@@ -1,7 +1,27 @@
 # FlashMLA V3.2 Native FP8 Sparse Prefill
 
-This private repository contains the SM100 native-FP8 sparse-prefill v8 path
-for the DeepSeek V3.2 KV-cache layout:
+This repository contains the SM100 native-FP8 sparse-prefill path for the
+DeepSeek V3.2 KV-cache layout:
+
+## Tensor shapes that are actually measured
+
+For one planned case, setup creates the following tensors before timing:
+
+| Tensor | Shape | Type |
+| --- | --- | --- |
+| Query | `[rows, Hexec, 576]` | BF16 |
+| V3.2 FP8 KV cache | `[ceil(kv_len / 64), 64, 1, 656]` | FP8 byte container |
+| Sparse indices | `[rows, 1, topk_effective]` | INT32 |
+| Output | `[rows, Hexec, 512]` | BF16 |
+| Max logits | `[rows, Hexec]` | FP32 |
+| LSE | `[rows, Hexec]` | FP32 |
+
+`batch` is represented by flattening its rank-local query tokens into `rows`.
+The microbenchmark uses one visible KV pool of length `cached + new`; it does
+not allocate a separate KV pool per batch item. This isolates the kernel's
+query-row workload and matches the flat native-FP8 API boundary.
+
+The fixed layout and execution contract are:
 
 - query/key dimension: `d_qk = 576`
 - value/output dimension: `d_v = 512`
@@ -11,7 +31,7 @@ for the DeepSeek V3.2 KV-cache layout:
 
 The CUDA kernel computes 64 query heads per launch. H64 therefore uses one
 kernel launch. H128 allocates `out`, `max_logits`, and `lse` once at their full
-H128 shapes, then launches the same H64 kernel twice into disjoint head slices.
+H128 shapes, then launches the H64 kernel twice into disjoint head slices.
 There is no output concatenation, combine kernel, D2D copy, or cross-head
 reduction.
 
@@ -98,8 +118,8 @@ python -m pip install -v --no-build-isolation .
 
 ### Correctness and launch validation
 
-The repository uses one consolidated v8 test file for H64, H128, edge cases,
-trace validation, launch auditing, and Compute Sanitizer entry points.
+The repository uses one consolidated native-FP8 test file for H64, H128, edge
+cases, trace validation, launch auditing, and Compute Sanitizer entry points.
 
 ```bash
 # Full H64 and H128 numerical suite.
@@ -120,11 +140,11 @@ compute-sanitizer --tool memcheck --error-exitcode=1 \
   --heads 128 --case edge --launch-only
 ```
 
-The launch audit fails if H64 does not produce exactly one v8 kernel activity,
-if H128 does not produce exactly two, or if it observes a CUDA combine, copy,
-memset, or `aten::cat` inside the profiled API call.
+The launch audit fails if H64 does not produce exactly one native kernel
+activity, if H128 does not produce exactly two, or if it observes a CUDA
+combine, copy, memset, or `aten::cat` inside the profiled API call.
 
-## 2. Benchmark the v8 kernel
+## 2. Benchmark the native FP8 kernel
 
 Run the standalone benchmark from the repository root:
 
@@ -170,24 +190,6 @@ topk_effective       = floor(min(topk, kv_len) / 64) * 64
 and `topk_effective` must be at least 64. Smaller `Hlocal` values are zero-padded
 to H64 or H128 before timing; the kernel still executes the full `Hexec` extent.
 
-### Tensor shapes that are actually measured
-
-For one planned case, setup creates the following tensors before timing:
-
-| Tensor | Shape | Type |
-| --- | --- | --- |
-| Query | `[rows, Hexec, 576]` | BF16 |
-| V3.2 FP8 KV cache | `[ceil(kv_len / 64), 64, 1, 656]` | FP8 byte container |
-| Sparse indices | `[rows, 1, topk_effective]` | INT32 |
-| Output | `[rows, Hexec, 512]` | BF16 |
-| Max logits | `[rows, Hexec]` | FP32 |
-| LSE | `[rows, Hexec]` | FP32 |
-
-`batch` is represented by flattening its rank-local query tokens into `rows`.
-The microbenchmark uses one visible KV pool of length `cached + new`; it does
-not allocate a separate KV pool per batch item. This isolates the kernel's
-query-row workload and matches the flat v8 API boundary.
-
 All random input generation, KV quantization, and sparse-index construction
 happen outside the timed interval. Each measured iteration flushes the requested
 L2-sized buffer before the start CUDA event. The flush itself is excluded from
@@ -195,7 +197,39 @@ elapsed time. Results report the median of CUDA-event samples, so CPU setup and
 Python dispatch time are not included. For H128, both sequential H64 CUDA
 launches are inside the measured interval.
 
-### Example A: TP=1, CP=1, H128, multiple batch sizes
+### Example A: H64 and H128, multiple batch sizes
+
+These two runs use the same query/KV/top-k workload and batch-size sweep. Only
+the head mapping changes.
+
+#### H64: TP=2, CP=1
+
+```bash
+RUN_TAG=$(date +%Y%m%d_%H%M%S)
+PYTHONPATH="$PWD" python -B benchmark/v8/mla_fp8_prefill_bench.py \
+  --suite custom \
+  --layouts v32 \
+  --batch 1 2 4 8 16 32 \
+  --new 875 \
+  --cached 69125 \
+  --global-heads 128 \
+  --tp 2 \
+  --cp 1 \
+  --cp-rank 0 \
+  --topk 2048 \
+  --test v8 \
+  --warmup 50 \
+  --iters 300 \
+  --flush-mb 256 \
+  --no-install \
+  --csv "benchmark/v8/tp2_h64_bs_${RUN_TAG}.csv"
+```
+
+Here `attention_tp=2`, `Hlocal=64`, and `Hexec=64`. Every timed API call
+contains one H64 kernel launch. The measured row counts are `875, 1750, 3500,
+7000, 14000, 28000` for BS `1, 2, 4, 8, 16, 32`.
+
+#### H128: TP=1, CP=1
 
 ```bash
 RUN_TAG=$(date +%Y%m%d_%H%M%S)
@@ -247,7 +281,7 @@ PYTHONPATH="$PWD" python -B benchmark/v8/mla_fp8_prefill_bench.py \
 
 The head mapping is exact:
 
-| TP | CP | attention TP | Hlocal | Hexec | v8 launches |
+| TP | CP | attention TP | Hlocal | Hexec | CUDA launches |
 | ---: | ---: | ---: | ---: | ---: | ---: |
 | 8 | 1 | 8 | 16 | 64 | 1 |
 | 8 | 2 | 4 | 32 | 64 | 1 |
@@ -309,20 +343,6 @@ receive 109. Their sum remains 875; the benchmark never silently discards the
 remainder. These ranks are benchmarked sequentially in one process, not as a
 distributed multi-GPU job.
 
-### Example E: H64 control
-
-```bash
-PYTHONPATH="$PWD" python -B benchmark/v8/mla_fp8_prefill_bench.py \
-  --suite custom --layouts v32 \
-  --batch 1 2 4 8 --new 875 --cached 69125 \
-  --global-heads 128 --tp 2 --cp 1 --cp-rank 0 \
-  --topk 2048 --test v8 \
-  --warmup 50 --iters 300 --flush-mb 256 --no-install \
-  --csv benchmark/v8/tp2_h64_control.csv
-```
-
-`TP=2, CP=1` gives `attention_tp=2`, `Hlocal=64`, and one H64 kernel launch.
-
 ### Preview without using a GPU
 
 Add `--dry-run` to any command to print every derived shape, valid TP/CP pair,
@@ -341,3 +361,29 @@ The CPU-only benchmark-planner tests are:
 ```bash
 python -B -m unittest benchmark.v8.test_mla_fp8_prefill_bench
 ```
+
+## 3. Files changed
+
+The H64/H128 implementation added or modified the following files on top of the
+pre-existing FP8 development branch:
+
+| File | Purpose |
+| --- | --- |
+| `csrc/sm100/prefill/sparse/fwd_v32_kernelv8.cu` | SM100 sparse-prefill CUDA kernel and the H64 launch implementation. |
+| `csrc/api/v32_kernelv8_fp8_prefill_fwd_bridge.h` | PyTorch bridge, validation, full-shape output allocation, and H64/H128 dispatch. |
+| `csrc/sm100/prefill/sparse/v8_trace_schema.h` | Trace-buffer schema used by the diagnostic API. |
+| `csrc/sm100/prefill/sparse/common_subroutine.h` | Shared sparse-prefill helper required by this kernel path. |
+| `csrc/api/api.cpp` | Python extension registration for the forward and trace entry points. |
+| `setup.py` | Build registration for the added SM100 CUDA source. |
+| `tests/test_flash_mla_sparse_prefill_fp8_v32_v8.py` | Consolidated H64/H128 correctness, bitwise split comparison, trace, launch-count, and sanitizer test entry points. |
+| `benchmark/v8/mla_fp8_prefill_bench.py` | Standalone benchmark runner and TP/CP/head-shape planner. |
+| `benchmark/v8/v32_kernelv8_fp8_prefill_fwd_adapter.py` | Adapter from benchmark tensors to the native extension API. |
+| `benchmark/v8/test_mla_fp8_prefill_bench.py` | CPU-only tests for benchmark planning and validation. |
+| `benchmark/v8/README.md`, `benchmark/v8/__init__.py` | Benchmark package notes and package marker. |
+| `docs/v32_native_fp8_prefill_v8.md` | Detailed English implementation and operating notes. |
+| `docs/v32_native_fp8_prefill_v8_zh-CN.md` | Detailed Simplified Chinese implementation and operating notes. |
+| `README.md` | Build, validation, measured tensor shapes, and benchmark workflows. |
+| `.gitignore` | Excludes generated artifacts and private working materials from publication. |
+
+Generated binaries, Python caches, benchmark outputs, PDFs, and private working
+notes are not part of the repository.
