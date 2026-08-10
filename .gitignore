@@ -1,0 +1,19 @@
+build
+*.so
+*.egg-info/
+__pycache__/
+/3.2.pdf
+/DeepSeek_V4.pdf
+/Blackwell SM100 GEMMs.md
+/how.md
+/howto_cn.md
+/tcgen05.md
+/writeup.md
+dist/
+*perf.csv
+*.png
+/.vscode
+compile_commands.json
+.cache
+/dev
+/.clangd
