@@ -1,7 +1,7 @@
-# FlashMLA V3.2 Native FP8 Sparse Prefill
+# Native FP8 Sparse Prefill Kernel for DeepSeek V3.2 (FlashMLA)
 
-This repository contains the SM100 native-FP8 sparse-prefill path for the
-DeepSeek V3.2 KV-cache layout:
+This repository contains the native fp8 sparse prefill path for the
+DeepSeek V3.2.
 
 ## Tensor shapes that are actually measured
 
@@ -144,7 +144,7 @@ The launch audit fails if H64 does not produce exactly one native kernel
 activity, if H128 does not produce exactly two, or if it observes a CUDA
 combine, copy, memset, or `aten::cat` inside the profiled API call.
 
-## 2. Benchmark the native FP8 kernel
+## 2. Benchmark the kernel
 
 Run the standalone benchmark from the repository root:
 
@@ -156,7 +156,7 @@ The default command uses the standalone FlashMLA package and does not import
 SGLang. FlashInfer is imported only when `--trtllm` is requested. The benchmark
 never installs dependencies.
 
-### What one benchmark case means
+### Benchmark arguments
 
 The planner models an SGLang-style DP=1 attention group. Each requested list is
 part of a Cartesian product, after invalid configurations are filtered.
