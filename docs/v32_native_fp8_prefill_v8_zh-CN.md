@@ -25,8 +25,8 @@ Attention 的不同 heads 在数学上彼此独立，因此按 head 维度拆分
 ## 克隆与编译
 
 ```bash
-git clone https://github.com/galbi-joa/FlashMLA_v3.2_fp8_prefill.git
-cd FlashMLA_v3.2_fp8_prefill
+git clone https://github.com/galbi-joa/flashmla-fp8-prefill-v3.2.git
+cd flashmla-fp8-prefill-v3.2
 git submodule update --init --recursive
 ```
 

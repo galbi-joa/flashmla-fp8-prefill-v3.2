@@ -26,8 +26,8 @@ test checks the H128 results against two explicit H64 calls bit-for-bit.
 ## Clone and compile
 
 ```bash
-git clone https://github.com/galbi-joa/FlashMLA_v3.2_fp8_prefill.git
-cd FlashMLA_v3.2_fp8_prefill
+git clone https://github.com/galbi-joa/flashmla-fp8-prefill-v3.2.git
+cd flashmla-fp8-prefill-v3.2
 git submodule update --init --recursive
 ```
 
