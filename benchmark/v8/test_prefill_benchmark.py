@@ -1,17 +1,33 @@
 import io
 from contextlib import redirect_stdout
+import os
+from pathlib import Path
+import signal
+import subprocess
+import tempfile
 import unittest
+from unittest import mock
+
+import torch
 
 from benchmark.v8.prefill_benchmark import (
     Case,
     TimeResult,
     build_cases,
+    critical_path_median,
+    derive_rank_topology,
+    divisors,
     execution_heads_for_local,
+    has_complete_torchrun_env,
+    launcher_watchdog_seconds,
     make_parallel_case,
+    maybe_launch_distributed,
     parse_args,
     print_result_matrix,
+    rerange_cp_rank_major,
     result_row,
     selected_backends,
+    write_csv,
 )
 
 
@@ -33,6 +49,210 @@ class ParallelCaseTest(unittest.TestCase):
             ],
         )
         self.assertEqual(selected_backends(args), ("decode", "v8"))
+
+    def test_two_gpu_default_uses_physical_tp_and_dsa_cp_endpoints(self):
+        rank0_args = parse_args([], distributed_world_size=2, distributed_rank=0)
+        rank1_args = parse_args([], distributed_world_size=2, distributed_rank=1)
+        rank0_cases = build_cases(rank0_args)
+        rank1_cases = build_cases(rank1_args)
+
+        self.assertEqual(len(rank0_cases), 12)
+        self.assertEqual(rank0_args.tp, [2])
+        self.assertEqual(rank0_args.cp, [1, 2])
+        self.assertEqual(
+            [(case.cp_size, case.heads) for case in rank0_cases[:2]],
+            [(1, 64), (2, 128)],
+        )
+        self.assertEqual(
+            [(case.cp_rank, case.attention_tp_rank) for case in rank0_cases[:2]],
+            [(0, 0), (0, 0)],
+        )
+        self.assertEqual(
+            [(case.cp_rank, case.attention_tp_rank) for case in rank1_cases[:2]],
+            [(0, 1), (1, 0)],
+        )
+        self.assertTrue(all(case.physical for case in rank0_cases + rank1_cases))
+
+    def test_physical_round_robin_uses_runtime_padding(self):
+        expected = {
+            1: (880, 875, 5, 16, 64),
+            2: (438, 437, 1, 32, 64),
+            4: (220, 218, 2, 64, 64),
+            8: (110, 109, 1, 128, 128),
+        }
+        args = parse_args(
+            ["--cp", "--batch", "1"],
+            distributed_world_size=8,
+            distributed_rank=7,
+        )
+        cases = build_cases(args)
+
+        self.assertEqual(args.cp, [1, 2, 4, 8])
+        for case in cases:
+            rows, logical, padding, local_heads, execution_heads = expected[
+                case.cp_size
+            ]
+            self.assertEqual(case.rows, rows)
+            self.assertEqual(case.logical_rows, logical)
+            self.assertEqual(case.padding_rows, padding)
+            self.assertEqual(case.logical_heads, local_heads)
+            self.assertEqual(case.heads, execution_heads)
+
+    def test_physical_cp_partitions_the_flattened_batch_not_each_request(self):
+        rows = []
+        for rank in range(8):
+            args = parse_args(
+                ["--tp", "8", "--cp", "8", "--batch", "8", "--new", "1"],
+                distributed_world_size=8,
+                distributed_rank=rank,
+            )
+            case = build_cases(args)[0]
+            rows.append((case.logical_rows, case.rows, case.padding_rows))
+        self.assertEqual(rows, [(1, 2, 1)] * 8)
+
+    def test_rank_topology_matches_sglang_group_layout(self):
+        topology = derive_rank_topology(
+            world_size=8,
+            total_tp=8,
+            cp_size=2,
+            global_heads=128,
+            global_rank=5,
+        )
+        self.assertEqual(topology.attention_tp_size, 4)
+        self.assertEqual(topology.cp_rank, 1)
+        self.assertEqual(topology.attention_tp_rank, 1)
+        self.assertEqual(topology.attention_tp_ranks, (4, 5, 6, 7))
+        self.assertEqual(topology.cp_ranks, (1, 5))
+        self.assertEqual((topology.head_start, topology.head_stop), (32, 64))
+
+        coordinates = {
+            (
+                derive_rank_topology(8, 8, 2, 128, rank).cp_rank,
+                derive_rank_topology(8, 8, 2, 128, rank).attention_tp_rank,
+            )
+            for rank in range(8)
+        }
+        self.assertEqual(coordinates, {(cp, tp) for cp in range(2) for tp in range(4)})
+
+    def test_physical_job_rejects_manual_rank_and_world_mismatch(self):
+        with self.assertRaisesRegex(ValueError, "derives CP rank"):
+            parse_args(
+                ["--cp-rank", "0"],
+                distributed_world_size=2,
+                distributed_rank=0,
+            )
+        with self.assertRaisesRegex(ValueError, "equal WORLD_SIZE"):
+            parse_args(
+                ["--tp", "1"],
+                distributed_world_size=2,
+                distributed_rank=0,
+            )
+
+    def test_critical_path_reducer_is_iteration_max_then_median(self):
+        samples = [
+            [10.0, 1.0, 1.0],
+            [1.0, 10.0, 1.0],
+            [1.0, 1.0, 10.0],
+        ]
+        self.assertEqual(critical_path_median(samples), 10.0)
+        self.assertEqual(max(sorted(rank)[1] for rank in samples), 1.0)
+        with self.assertRaises(ValueError):
+            critical_path_median([[1.0, float("nan")]])
+
+    def test_cp_rerange_matches_sglang_transpose_reshape_order(self):
+        rank_major = torch.tensor([[10], [0], [20], [0]], dtype=torch.int32)
+        token_major = rerange_cp_rank_major(rank_major, cp_size=2)
+        self.assertEqual(token_major.flatten().tolist(), [10, 20, 0, 0])
+        with self.assertRaises(ValueError):
+            rerange_cp_rank_major(rank_major, cp_size=3)
+
+    def test_divisors_drive_physical_cp_sweep(self):
+        self.assertEqual(divisors(8), [1, 2, 4, 8])
+
+    def test_partial_torchrun_environment_is_rejected(self):
+        with mock.patch.dict(os.environ, {"RANK": "0"}, clear=True):
+            with self.assertRaisesRegex(ValueError, "partial torchrun environment"):
+                has_complete_torchrun_env()
+        complete = {
+            "RANK": "0",
+            "LOCAL_RANK": "0",
+            "WORLD_SIZE": "1",
+            "MASTER_ADDR": "127.0.0.1",
+            "MASTER_PORT": "29500",
+        }
+        with mock.patch.dict(os.environ, complete, clear=True):
+            self.assertTrue(has_complete_torchrun_env())
+
+    def test_auto_launcher_propagates_worker_exit_and_safety_environment(self):
+        process = mock.Mock()
+        process.wait.return_value = 7
+        with (
+            mock.patch.dict(os.environ, {}, clear=True),
+            mock.patch("torch.cuda.device_count", return_value=2),
+            mock.patch(
+                "benchmark.v8.prefill_benchmark.subprocess.Popen",
+                return_value=process,
+            ) as popen,
+        ):
+            self.assertEqual(maybe_launch_distributed(["--batch", "1"]), 7)
+        command = popen.call_args.args[0]
+        environment = popen.call_args.kwargs["env"]
+        self.assertIn("--nproc-per-node=2", command)
+        self.assertEqual(command.count("--distributed-worker"), 1)
+        self.assertEqual(environment["TORCH_NCCL_ASYNC_ERROR_HANDLING"], "1")
+        self.assertEqual(environment["TORCH_NCCL_BLOCKING_WAIT"], "1")
+        process.wait.assert_called_once_with(timeout=2 * 60 * 60)
+
+    def test_auto_launcher_watchdog_terminates_the_worker_process_group(self):
+        process = mock.Mock(pid=4321)
+        process.wait.side_effect = [
+            subprocess.TimeoutExpired("torchrun", 5),
+            0,
+        ]
+        process.poll.return_value = None
+        with (
+            mock.patch.dict(
+                os.environ,
+                {"MLA_PREFILL_BENCH_WATCHDOG_SECONDS": "5"},
+                clear=True,
+            ),
+            mock.patch("torch.cuda.device_count", return_value=2),
+            mock.patch(
+                "benchmark.v8.prefill_benchmark.subprocess.Popen",
+                return_value=process,
+            ),
+            mock.patch("benchmark.v8.prefill_benchmark.os.killpg") as killpg,
+            redirect_stdout(io.StringIO()),
+        ):
+            with mock.patch("sys.stderr", io.StringIO()):
+                self.assertEqual(maybe_launch_distributed([]), 124)
+        killpg.assert_called_once_with(4321, signal.SIGTERM)
+
+    def test_watchdog_and_timing_inputs_are_validated(self):
+        with mock.patch.dict(
+            os.environ,
+            {"MLA_PREFILL_BENCH_WATCHDOG_SECONDS": "bad"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(ValueError, "must be an integer"):
+                launcher_watchdog_seconds()
+        for argv, message in (
+            (["--iters", "0"], "--iters must be positive"),
+            (["--warmup", "-1"], "--warmup must be non-negative"),
+            (["--flush-mb", "-1"], "--flush-mb must be non-negative"),
+            (["--limit", "-1"], "--limit must be non-negative"),
+        ):
+            with self.subTest(argv=argv):
+                with self.assertRaisesRegex(ValueError, message):
+                    parse_args(argv)
+
+    def test_csv_write_is_atomic_and_leaves_no_temporary_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "result.csv"
+            with redirect_stdout(io.StringIO()):
+                write_csv(str(output), [{"case": "h64", "ms": "1.0"}])
+            self.assertEqual(output.read_text().splitlines(), ["case,ms", "h64,1.0"])
+            self.assertEqual(list(output.parent.glob(f".{output.name}.tmp.*")), [])
 
     def test_bare_tp_and_cp_select_documented_sweeps(self):
         tp_args = parse_args(["--tp"])
@@ -402,12 +622,40 @@ class ParallelCaseTest(unittest.TestCase):
         self.assertEqual(row["heads"], "32")
         self.assertEqual(row["execution_heads"], "64")
         self.assertEqual(row["heads_actual"], "64")
+        self.assertEqual(row["kernel_ms"], "1.250000")
+        self.assertEqual(row["cp_allgather_probe_plus_kernel_ms"], "")
 
         output = io.StringIO()
         with redirect_stdout(output):
             print_result_matrix([row], {"v8"})
         self.assertIn("1.2500", output.getvalue())
         self.assertIn("Hglobal", output.getvalue())
+
+    def test_physical_csv_records_world_row_ranges(self):
+        case = make_parallel_case(
+            "physical-schema",
+            "v32",
+            batch=1,
+            new_tokens=875,
+            cached_len=69125,
+            tp_size=8,
+            cp_size=8,
+            global_heads=128,
+            topk=2048,
+            cp_rank=7,
+            physical=True,
+            global_rank=7,
+            world_size=8,
+            attention_tp_rank=0,
+        )
+        row = result_row(case, TimeResult("v8", True, 1.0, kernel_ms=1.0))
+        self.assertEqual(row["logical_rows"], "109")
+        self.assertEqual(row["logical_rows_min"], "109")
+        self.assertEqual(row["logical_rows_max"], "110")
+        self.assertEqual(row["padding_rows_min"], "0")
+        self.assertEqual(row["padding_rows_max"], "1")
+        self.assertEqual(row["rank_scope"], "all-ranks")
+        self.assertEqual(row["cp_allgather_probe_plus_kernel_ms"], "")
 
     def test_execution_bucket_boundaries(self):
         self.assertEqual(execution_heads_for_local(1), 64)

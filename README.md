@@ -16,10 +16,11 @@ For one planned case, setup creates the following tensors before timing:
 | Max logits | `[rows, Hexec]` | FP32 |
 | LSE | `[rows, Hexec]` | FP32 |
 
-`batch` is represented by flattening its rank-local query tokens into `rows`.
-The microbenchmark uses one visible KV pool of length `cached + new`; it does
-not allocate a separate KV pool per batch item. This isolates the kernel's
-query-row workload and matches the flat native-FP8 API boundary.
+`batch` is represented by flattening query tokens into `rows`; physical CP then
+applies SGLang-compatible padding and round-robin rank partitioning. Each
+process uses one visible KV pool of length `cached + new`; it does not allocate
+a separate KV pool per batch item. This isolates the kernel's query-row
+workload and matches the flat native-FP8 API boundary.
 
 The fixed layout and execution contract are:
 
@@ -156,6 +157,30 @@ The default command uses the standalone FlashMLA package and does not import
 SGLang. FlashInfer is imported only when `--trtllm` is requested. The benchmark
 never installs dependencies.
 
+### Automatic one-GPU or physical multi-GPU execution
+
+The same command adapts to the number of visible CUDA devices:
+
+```bash
+PYTHONPATH="$PWD" python -B benchmark/v8/prefill_benchmark.py
+```
+
+- With one visible GPU, it preserves the local H64/H128 kernel microbenchmark.
+  TP/CP values describe a rank-local shape only; no distributed claim is made.
+- With `N >= 2` visible GPUs, it automatically re-launches itself through
+  `torch.distributed.run`, assigns one process to each GPU, initializes NCCL,
+  and sets total TP to `N`.
+- The physical default runs pure attention TP `(TP=N, CP=1)` and the
+  `(TP=N, CP=N)` topology forced by current DP=1 DSA prefill CP.
+- `--gpus N` selects the first `N` visible devices. `--gpus 1` explicitly
+  forces the local one-GPU path.
+
+The automatic launcher is single-node. Every participating device must be an
+SM100 B200/B300, and one physical job requires `WORLD_SIZE == TP`. To measure a
+different TP degree, launch a separate command with matching `--gpus N --tp N`.
+NCCL selects the transport available on that host (for example NVLink or PCIe),
+so the communication is physical rather than simulated.
+
 ### Benchmark arguments
 
 The planner models an SGLang-style DP=1 attention group. Each requested list is
@@ -163,28 +188,45 @@ part of a Cartesian product, after invalid configurations are filtered.
 
 | CLI value | Meaning |
 | --- | --- |
-| `--batch` | Number of requests, reported as BS. It multiplies rank-local query rows. |
+| `--batch` | Number of requests, reported as BS. Tokens are flattened before physical CP padding/splitting. |
 | `--new` | New query tokens per request before context-parallel partitioning. |
 | `--cached` | Cached tokens already visible to the rank. |
 | `--tp` | Total tensor-parallel degree, including the CP subdivision. |
 | `--cp` | Attention context-parallel degree. `TP % CP == 0` is required. |
-| `--cp-rank` | The CP rank represented by this single-process microbenchmark. |
+| `--cp-rank` | CP rank represented by the one-GPU shape simulator; physical jobs derive it from `RANK`. |
 | `--topk` | Requested sparse KV selections per query row. |
 
-For every valid case, the benchmark derives:
+The rank layout used by a physical job matches SGLang's fastest-changing
+attention-TP axis:
 
 ```text
 attention_tp = TP / CP
 Hlocal       = global_heads / attention_tp
+attention_tp_rank = global_rank % attention_tp
+cp_rank           = global_rank // attention_tp
+
 Hexec        = 64  when 1 <= Hlocal <= 64
              = 128 when 65 <= Hlocal <= 128
+```
 
-quotient, remainder = divmod(new, CP)
-q_per_rank           = quotient + int(cp_rank < remainder)
-rows                 = batch * q_per_rank
+For a one-GPU simulated CP rank, query rows retain the original
+quotient/remainder rule. A physical job instead reproduces SGLang's flattened
+round-robin padding:
+
+```text
+Tlogical  = batch * new
+Tpadded   = ceil_align(ceil_align(Tlogical, attention_tp), 2 * CP)
+rows      = Tpadded / CP                       # physical rows on every rank
+logical_r = Tlogical // CP + int(r < Tlogical % CP)
+padding_r = rows - logical_r
+
 kv_len               = cached + new
 topk_effective       = floor(min(topk, kv_len) / 64) * 64
 ```
+
+For example, `batch=1`, `new=875`, `TP=CP=8` pads the flattened stream to
+880 tokens. Every physical rank executes 110 rows; ranks 0-2 have 110 logical
+rows, while ranks 3-7 have 109 logical rows plus one dummy row.
 
 `global_heads` must be divisible by `attention_tp`, `Hexec` may not exceed 128,
 and `topk_effective` must be at least 64. Smaller `Hlocal` values are zero-padded
@@ -193,18 +235,52 @@ to H64 or H128 before timing; the kernel still executes the full `Hexec` extent.
 All random input generation, KV quantization, and sparse-index construction
 happen outside the timed interval. Each measured iteration flushes the requested
 L2-sized buffer before the start CUDA event. The flush itself is excluded from
-elapsed time. Results report the median of CUDA-event samples, so CPU setup and
-Python dispatch time are not included. For H128, both sequential H64 CUDA
-launches are inside the measured interval.
+elapsed time. For H128, both sequential H64 CUDA launches are inside the event
+interval.
 
-### Default: H64 and H128, decode versus native prefill
+In a physical job, every iteration is start-aligned across ranks. The reported
+kernel latency is `median(iteration-wise maximum rank latency)`, not the average
+or the maximum of per-rank medians. Barriers, L2 flushing, process-group setup,
+and the result reduction are instrumentation outside the measured interval.
+Runtime errors are agreed through a separate Gloo control group before the next
+iteration. NCCL groups have a 120-second failure timeout, and the automatic
+launcher has a two-hour whole-job watchdog. Set
+`MLA_PREFILL_BENCH_WATCHDOG_SECONDS` only when a deliberate run needs longer.
+
+### What the physical communication columns mean
+
+The distributed benchmark reports real NCCL operations, but it does not claim
+to be a full DeepSeek layer or full SGLang end-to-end benchmark:
+
+| CSV/table metric | Timed boundary |
+| --- | --- |
+| `kernel_ms` | Rank-local attention kernel only, reduced as the synchronous rank-max p50. |
+| `cp_latent_allgather_probe_ms` | Actual NCCL all-gather of this layer's new/padded BF16 latent KV `[rows, 576]`, followed by SGLang's `view`/`transpose`/`reshape` rank-major to token-major rerange. It does not gather the 70K cached prefix. |
+| `cp_allgather_probe_plus_kernel_ms` | The same CP probe followed by the selected kernel on one CUDA stream. The gathered probe output is not packed into the kernel's prebuilt FP8 cache. It also excludes indexer/top-k, projection, MLP communication, and model-final output gather, so it is not production E2E. |
+| `tp_o_proj_allreduce_probe_ms` | Actual NCCL all-reduce using the mathematically valid post-`o_proj` BF16 payload `[rows, 7168]`. Projection GEMMs are absent, so this remains a communication probe rather than layer latency. |
+
+The benchmark never all-reduces raw attention output
+`[rows, Hlocal, 512]`: TP ranks own different heads, so doing that would be
+mathematically wrong. Current DSA production CP gathers BF16 latent KV before it
+is packed into the 656-byte FP8 cache. The benchmark therefore does not pretend
+that gathering packed FP8 cache bytes is the production collective.
+
+This is a topology and latency benchmark, not a distributed numerical oracle:
+it does not reconstruct logical output after trimming dummy token/head padding.
+The `*_payload_bytes_per_rank` CSV fields are local input sizes, not estimates
+of NCCL wire traffic, and rank-local metadata in the rank-0 CSV is identified by
+the accompanying all-rank min/max and scope fields. Depending on the SGLang
+runtime configuration, the post-projection collective can be all-reduce or
+reduce-scatter; this standalone probe intentionally measures all-reduce only.
+
+### Default comparison
 
 ```bash
 PYTHONPATH="$PWD" python -B benchmark/v8/prefill_benchmark.py
 ```
 
-No arguments are required. The command runs BS `1, 2, 4, 8, 16, 32` for both
-of these configurations:
+With one GPU, no arguments run BS `1, 2, 4, 8, 16, 32` for both of these
+rank-local configurations:
 
 | TP | CP | Hlocal | Hexec | Native prefill launches |
 | ---: | ---: | ---: | ---: | ---: |
@@ -215,6 +291,16 @@ Every case compares the FlashMLA FP8 sparse decode path with the native FP8
 prefill path. Direct decode uses dynamic shared memory proportional to folded
 query rows, so very large batches can appear as `n/a`; use `--decode-chunked`
 to add the sequential chunked lower-bound comparison.
+
+With two GPUs, the physical SGLang endpoint shapes are naturally H64 and H128:
+
+| GPUs | TP | CP | attention TP | Hlocal | Hexec | Status |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 2 | 2 | 1 | 2 | 64 | 64 | production pure TP |
+| 2 | 2 | 2 | 1 | 128 | 128 | current DSA-CP topology endpoint |
+
+With four or eight GPUs, the pure-TP endpoint has Hlocal 32 or 16 and is padded
+to H64; the DSA-CP endpoint remains H128.
 
 ### Add comparison kernels individually
 
@@ -234,6 +320,8 @@ python -B benchmark/v8/prefill_benchmark.py --list-kernels
 ```
 
 ### TP and CP presets
+
+On a one-GPU host these retain the shape-simulation presets:
 
 ```bash
 # TP=1,2,4,8 with CP=1.
@@ -260,6 +348,23 @@ The planner reports and skips invalid pairs such as `TP=2, CP=4`. Valid pairs
 are stored with separate `tp_size`, `attention_tp_size`, `cp_size`,
 `global_heads`, `local_heads`, and `execution_heads` CSV columns.
 
+On a physical `N`-GPU job, a bare `--tp` runs `TP=N, CP=1`. A bare `--cp`
+runs every divisor of `N` with real process groups and NCCL collectives:
+
+```bash
+# On an 8-GPU host: CP=1,2,4,8 at total TP=8.
+python -B benchmark/v8/prefill_benchmark.py --gpus 8 --cp
+```
+
+Current DP=1 DSA CP forces the `CP=TP` endpoint; `CP=1` is the pure-TP path.
+Intermediate factorizations such as `TP=8, CP=2/4` are labeled
+`experimental-tp-cp` in stdout and `topology_status`; they are real distributed
+topology measurements, not current DSA configurations. SGLang currently warns
+that DSA CP has only been verified on Hopper, so SM100 results here are an
+experimental kernel/communication study, not a production-validation claim.
+Current single-node DSA CP is also limited to TP/CP at most 8; larger endpoint
+plans are labeled `experimental-dsa-cp-over-8`.
+
 To inspect all ranks of one CP configuration:
 
 ```bash
@@ -268,8 +373,9 @@ python -B benchmark/v8/prefill_benchmark.py \
 ```
 
 For `new=875` and `CP=8`, ranks 0-2 receive 110 query tokens and ranks 3-7
-receive 109. These cases still run sequentially in one process; this standalone
-microbenchmark does not launch a distributed multi-GPU job.
+receive 109 logical tokens. This `--all-ranks` command is deliberately a
+one-GPU sequential shape simulation. In a physical job, CP rank is derived from
+the process topology and `--cp-rank/--all-ranks` are rejected.
 
 ### Preview without using a GPU
 
@@ -279,6 +385,13 @@ allocating CUDA tensors:
 
 ```bash
 python -B benchmark/v8/prefill_benchmark.py --tp --cp --dry-run --csv ""
+```
+
+You can preview an unavailable physical topology without launching CUDA by
+supplying a GPU count explicitly:
+
+```bash
+python -B benchmark/v8/prefill_benchmark.py --dry-run --gpus 8 --cp --csv ""
 ```
 
 The CPU-only benchmark-planner tests are:
@@ -301,7 +414,7 @@ pre-existing FP8 development branch:
 | `csrc/api/api.cpp` | Python extension registration for the forward and trace entry points. |
 | `setup.py` | Build registration for the added SM100 CUDA source. |
 | `tests/test_flash_mla_sparse_prefill_fp8_v32_v8.py` | Consolidated H64/H128 correctness, bitwise split comparison, trace, launch-count, and sanitizer test entry points. |
-| `benchmark/v8/prefill_benchmark.py` | Standalone multi-kernel benchmark runner and TP/CP/head-shape planner. |
+| `benchmark/v8/prefill_benchmark.py` | Standalone multi-kernel runner, automatic torchrun launcher, physical NCCL TP/CP probes, and TP/CP/head-shape planner. |
 | `benchmark/v8/v32_kernelv8_fp8_prefill_fwd_adapter.py` | Adapter from benchmark tensors to the native extension API. |
 | `benchmark/v8/test_prefill_benchmark.py` | CPU-only tests for benchmark planning and validation. |
 | `benchmark/v8/README.md`, `benchmark/v8/__init__.py`, `benchmark/v8/__main__.py` | Benchmark package notes and module entry point. |
