@@ -107,64 +107,32 @@ compute-sanitizer --tool memcheck --error-exitcode=1 \
 因为一个共享 timestamp buffer 无法在不修改 trace schema 的情况下表示两个
 head group。
 
-## 运行 v8 benchmark
+## 运行 prefill benchmark
 
-该 benchmark 不依赖 SGLang，也不会自动安装依赖，只测量原生 v8 路径。
-请从仓库根目录运行，并用 `PYTHONPATH` 优先加载当前源码目录中的扩展。
-
-### TP=1、CP=1、H128，多 batch size
+默认命令会对 BS `1、2、4、8、16、32` 同时测量 H64 和 H128，并比较
+FlashMLA FP8 sparse decode 与原生 prefill 路径：
 
 ```bash
-RUN_TAG=$(date +%Y%m%d_%H%M%S)
-PYTHONPATH="$PWD" python -B benchmark/v8/mla_fp8_prefill_bench.py \
-  --suite custom \
-  --layouts v32 \
-  --batch 1 2 4 8 16 32 \
-  --new 875 \
-  --cached 69125 \
-  --global-heads 128 \
-  --tp 1 \
-  --cp 1 \
-  --cp-rank 0 \
-  --topk 2048 \
-  --test v8 \
-  --warmup 50 \
-  --iters 300 \
-  --flush-mb 256 \
-  --no-install \
-  --csv "benchmark/v8/tp1_h128_bs_sweep_${RUN_TAG}.csv"
+PYTHONPATH="$PWD" python -B benchmark/v8/prefill_benchmark.py
 ```
 
-这里 `attention_tp=TP/CP=1`，所以每个 rank 拥有全部 128 个 query
-heads。每次被计时的 v8 API 调用都会启动两次 H64 CUDA kernel。
-
-### 固定总 TP，扫描 CP
+可以逐项增加其他比较 kernel：
 
 ```bash
-RUN_TAG=$(date +%Y%m%d_%H%M%S)
-PYTHONPATH="$PWD" python -B benchmark/v8/mla_fp8_prefill_bench.py \
-  --suite custom \
-  --layouts v32 \
-  --batch 1 8 \
-  --new 10000 \
-  --cached 90000 \
-  --global-heads 128 \
-  --tp 8 \
-  --cp 1 2 4 8 \
-  --cp-rank 0 \
-  --topk 512 1024 2048 \
-  --test v8 \
-  --warmup 50 \
-  --iters 300 \
-  --flush-mb 256 \
-  --no-install \
-  --csv "benchmark/v8/tp8_cp_sweep_${RUN_TAG}.csv"
+python -B benchmark/v8/prefill_benchmark.py \
+  --bf16 --fp8-dequant --trtllm --decode-chunked
 ```
 
-对于 `(TP, CP) = (8, 1)、(8, 2)、(8, 4)、(8, 8)`，benchmark 会报告
-`Hlocal = 16、32、64、128`，`Hexec = 64、64、64、128`。Query token
-按照 quotient/remainder 规则分配给 CP ranks，不会静默丢弃 remainder。
-使用 `--dry-run` 可以在不分配 CUDA tensor 的情况下查看完整计划。
+不带数值的 TP/CP 参数会启用内置扫描：
+
+```bash
+python -B benchmark/v8/prefill_benchmark.py --tp       # CP=1，TP 1、2、4、8
+python -B benchmark/v8/prefill_benchmark.py --cp       # TP=8，CP 1、2、4、8
+python -B benchmark/v8/prefill_benchmark.py --tp --cp  # 有效 TP x CP 矩阵
+```
+
+仍然可以显式指定 TP、CP、shape 和 rank。使用 `--dry-run` 可以在不分配
+CUDA tensor 的情况下查看完整计划。
 
 该 microbenchmark 模拟 DP=1 的 attention group。在常见的 SGLang DSA
 配置中 `CP=TP`，因此 `attention_tp=1`，每个 rank 都拥有 H128，并走两次

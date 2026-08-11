@@ -109,66 +109,32 @@ The instrumented trace API intentionally supports H64 only. H128 trace calls
 are rejected explicitly because one shared timestamp buffer cannot represent
 two head groups without changing the trace schema.
 
-## Run the v8 benchmark
+## Run the prefill benchmark
 
-The benchmark is standalone: it does not import SGLang or install dependencies.
-It measures only the native v8 path. Run it from the repository root with the
-in-tree extension first on `PYTHONPATH`.
-
-### TP=1, CP=1, H128, multiple batch sizes
+The default command measures H64 and H128 for BS `1, 2, 4, 8, 16, 32` and
+compares FlashMLA FP8 sparse decode against the native prefill path:
 
 ```bash
-RUN_TAG=$(date +%Y%m%d_%H%M%S)
-PYTHONPATH="$PWD" python -B benchmark/v8/mla_fp8_prefill_bench.py \
-  --suite custom \
-  --layouts v32 \
-  --batch 1 2 4 8 16 32 \
-  --new 875 \
-  --cached 69125 \
-  --global-heads 128 \
-  --tp 1 \
-  --cp 1 \
-  --cp-rank 0 \
-  --topk 2048 \
-  --test v8 \
-  --warmup 50 \
-  --iters 300 \
-  --flush-mb 256 \
-  --no-install \
-  --csv "benchmark/v8/tp1_h128_bs_sweep_${RUN_TAG}.csv"
+PYTHONPATH="$PWD" python -B benchmark/v8/prefill_benchmark.py
 ```
 
-Here `attention_tp=TP/CP=1`, so every rank owns all 128 query heads. Every
-measured v8 API call therefore launches the H64 CUDA kernel twice.
-
-### Fixed total TP with a CP sweep
+Add other comparison kernels individually:
 
 ```bash
-RUN_TAG=$(date +%Y%m%d_%H%M%S)
-PYTHONPATH="$PWD" python -B benchmark/v8/mla_fp8_prefill_bench.py \
-  --suite custom \
-  --layouts v32 \
-  --batch 1 8 \
-  --new 10000 \
-  --cached 90000 \
-  --global-heads 128 \
-  --tp 8 \
-  --cp 1 2 4 8 \
-  --cp-rank 0 \
-  --topk 512 1024 2048 \
-  --test v8 \
-  --warmup 50 \
-  --iters 300 \
-  --flush-mb 256 \
-  --no-install \
-  --csv "benchmark/v8/tp8_cp_sweep_${RUN_TAG}.csv"
+python -B benchmark/v8/prefill_benchmark.py \
+  --bf16 --fp8-dequant --trtllm --decode-chunked
 ```
 
-For `(TP, CP) = (8, 1), (8, 2), (8, 4), (8, 8)`, the benchmark reports
-`Hlocal = 16, 32, 64, 128` and `Hexec = 64, 64, 64, 128`. Query tokens are
-distributed with quotient/remainder CP semantics; no remainder is silently
-dropped. Use `--dry-run` to inspect the complete plan without allocating CUDA
-tensors.
+Use value-free TP/CP flags for the built-in sweeps:
+
+```bash
+python -B benchmark/v8/prefill_benchmark.py --tp       # TP 1,2,4,8 at CP=1
+python -B benchmark/v8/prefill_benchmark.py --cp       # CP 1,2,4,8 at TP=8
+python -B benchmark/v8/prefill_benchmark.py --tp --cp  # valid TP x CP matrix
+```
+
+Explicit TP, CP, shape, and rank values remain available. Use `--dry-run` to
+inspect the complete plan without allocating CUDA tensors.
 
 The microbenchmark models a DP=1 attention group. In the common SGLang DSA
 configuration where `CP=TP`, `attention_tp=1`, each rank owns H128 and uses the

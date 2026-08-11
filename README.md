@@ -149,11 +149,12 @@ combine, copy, memset, or `aten::cat` inside the profiled API call.
 Run the standalone benchmark from the repository root:
 
 ```bash
-PYTHONPATH="$PWD" python -B benchmark/v8/mla_fp8_prefill_bench.py --help
+PYTHONPATH="$PWD" python -B benchmark/v8/prefill_benchmark.py --help
 ```
 
-The benchmark imports neither SGLang nor FlashInfer and never installs
-dependencies. It measures only `v32_kernelv8_fp8_prefill_fwd`.
+The default command uses the standalone FlashMLA package and does not import
+SGLang. FlashInfer is imported only when `--trtllm` is requested. The benchmark
+never installs dependencies.
 
 ### What one benchmark case means
 
@@ -168,7 +169,6 @@ part of a Cartesian product, after invalid configurations are filtered.
 | `--tp` | Total tensor-parallel degree, including the CP subdivision. |
 | `--cp` | Attention context-parallel degree. `TP % CP == 0` is required. |
 | `--cp-rank` | The CP rank represented by this single-process microbenchmark. |
-| `--global-heads` | Model query heads before attention-TP sharding. |
 | `--topk` | Requested sparse KV selections per query row. |
 
 For every valid case, the benchmark derives:
@@ -197,151 +197,79 @@ elapsed time. Results report the median of CUDA-event samples, so CPU setup and
 Python dispatch time are not included. For H128, both sequential H64 CUDA
 launches are inside the measured interval.
 
-### Example A: H64 and H128, multiple batch sizes
-
-These two runs use the same query/KV/top-k workload and batch-size sweep. Only
-the head mapping changes.
-
-#### H64: TP=2, CP=1
+### Default: H64 and H128, decode versus native prefill
 
 ```bash
-RUN_TAG=$(date +%Y%m%d_%H%M%S)
-PYTHONPATH="$PWD" python -B benchmark/v8/mla_fp8_prefill_bench.py \
-  --suite custom \
-  --layouts v32 \
-  --batch 1 2 4 8 16 32 \
-  --new 875 \
-  --cached 69125 \
-  --global-heads 128 \
-  --tp 2 \
-  --cp 1 \
-  --cp-rank 0 \
-  --topk 2048 \
-  --test v8 \
-  --warmup 50 \
-  --iters 300 \
-  --flush-mb 256 \
-  --no-install \
-  --csv "benchmark/v8/tp2_h64_bs_${RUN_TAG}.csv"
+PYTHONPATH="$PWD" python -B benchmark/v8/prefill_benchmark.py
 ```
 
-Here `attention_tp=2`, `Hlocal=64`, and `Hexec=64`. Every timed API call
-contains one H64 kernel launch. The measured row counts are `875, 1750, 3500,
-7000, 14000, 28000` for BS `1, 2, 4, 8, 16, 32`.
+No arguments are required. The command runs BS `1, 2, 4, 8, 16, 32` for both
+of these configurations:
 
-#### H128: TP=1, CP=1
+| TP | CP | Hlocal | Hexec | Native prefill launches |
+| ---: | ---: | ---: | ---: | ---: |
+| 2 | 1 | 64 | 64 | 1 |
+| 1 | 1 | 128 | 128 | 2 |
+
+Every case compares the FlashMLA FP8 sparse decode path with the native FP8
+prefill path. Direct decode uses dynamic shared memory proportional to folded
+query rows, so very large batches can appear as `n/a`; use `--decode-chunked`
+to add the sequential chunked lower-bound comparison.
+
+### Add comparison kernels individually
 
 ```bash
-RUN_TAG=$(date +%Y%m%d_%H%M%S)
-PYTHONPATH="$PWD" python -B benchmark/v8/mla_fp8_prefill_bench.py \
-  --suite custom \
-  --layouts v32 \
-  --batch 1 2 4 8 16 32 \
-  --new 875 \
-  --cached 69125 \
-  --global-heads 128 \
-  --tp 1 \
-  --cp 1 \
-  --cp-rank 0 \
-  --topk 2048 \
-  --test v8 \
-  --warmup 50 \
-  --iters 300 \
-  --flush-mb 256 \
-  --no-install \
-  --csv "benchmark/v8/tp1_h128_bs_${RUN_TAG}.csv"
+PYTHONPATH="$PWD" python -B benchmark/v8/prefill_benchmark.py \
+  --bf16 \
+  --fp8-dequant \
+  --trtllm \
+  --decode-chunked
 ```
 
-Here `attention_tp=1`, `Hlocal=128`, and `Hexec=128`. Every timed API call
-contains two H64 kernel launches. The measured row counts are `875, 1750, 3500,
-7000, 14000, 28000` for BS `1, 2, 4, 8, 16, 32`.
-
-### Example B: fixed TP=8 with several CP values
+These flags add comparisons without removing the default `decode` and `v8`
+columns. `--trtllm` requires FlashInfer. List the available comparisons with:
 
 ```bash
-RUN_TAG=$(date +%Y%m%d_%H%M%S)
-PYTHONPATH="$PWD" python -B benchmark/v8/mla_fp8_prefill_bench.py \
-  --suite custom \
-  --layouts v32 \
+python -B benchmark/v8/prefill_benchmark.py --list-kernels
+```
+
+### TP and CP presets
+
+```bash
+# TP=1,2,4,8 with CP=1.
+python -B benchmark/v8/prefill_benchmark.py --tp
+
+# TP=8 with CP=1,2,4,8.
+python -B benchmark/v8/prefill_benchmark.py --cp
+
+# Valid TP x CP pairs from TP=1,2,4,8 and CP=1,2,4,8.
+python -B benchmark/v8/prefill_benchmark.py --tp --cp
+```
+
+Explicit values remain available:
+
+```bash
+python -B benchmark/v8/prefill_benchmark.py \
+  --tp 8 --cp 1 2 4 8 \
   --batch 1 8 \
-  --new 10000 \
-  --cached 90000 \
-  --global-heads 128 \
-  --tp 8 \
-  --cp 1 2 4 8 \
-  --cp-rank 0 \
-  --topk 512 1024 2048 \
-  --test v8 \
-  --warmup 50 \
-  --iters 300 \
-  --flush-mb 256 \
-  --no-install \
-  --csv "benchmark/v8/tp8_cp_bs_topk_${RUN_TAG}.csv"
+  --new 10000 --cached 90000 \
+  --topk 512 1024 2048
 ```
 
-The head mapping is exact:
+The planner reports and skips invalid pairs such as `TP=2, CP=4`. Valid pairs
+are stored with separate `tp_size`, `attention_tp_size`, `cp_size`,
+`global_heads`, `local_heads`, and `execution_heads` CSV columns.
 
-| TP | CP | attention TP | Hlocal | Hexec | CUDA launches |
-| ---: | ---: | ---: | ---: | ---: | ---: |
-| 8 | 1 | 8 | 16 | 64 | 1 |
-| 8 | 2 | 4 | 32 | 64 | 1 |
-| 8 | 4 | 2 | 64 | 64 | 1 |
-| 8 | 8 | 1 | 128 | 128 | 2 |
-
-### Example C: TP × CP matrix
+To inspect all ranks of one CP configuration:
 
 ```bash
-RUN_TAG=$(date +%Y%m%d_%H%M%S)
-PYTHONPATH="$PWD" python -B benchmark/v8/mla_fp8_prefill_bench.py \
-  --suite custom \
-  --layouts v32 \
-  --batch 1 4 16 \
-  --new 875 \
-  --cached 69125 \
-  --global-heads 128 \
-  --tp 1 2 4 8 \
-  --cp 1 2 4 8 \
-  --cp-rank 0 \
-  --topk 2048 \
-  --test v8 \
-  --warmup 30 \
-  --iters 100 \
-  --flush-mb 256 \
-  --no-install \
-  --csv "benchmark/v8/tp_cp_matrix_${RUN_TAG}.csv"
-```
-
-The planner records but skips invalid pairs such as `TP=2, CP=4`. Valid pairs
-are printed before allocation and stored with separate `tp_size`,
-`attention_tp_size`, `cp_size`, `global_heads`, `local_heads`, and
-`execution_heads` CSV columns.
-
-### Example D: inspect every CP rank and a remainder split
-
-```bash
-PYTHONPATH="$PWD" python -B benchmark/v8/mla_fp8_prefill_bench.py \
-  --suite custom \
-  --layouts v32 \
-  --batch 1 \
-  --new 875 \
-  --cached 69125 \
-  --global-heads 128 \
-  --tp 8 \
-  --cp 8 \
-  --cp-rank 0 1 2 3 4 5 6 7 \
-  --topk 2048 \
-  --test v8 \
-  --warmup 30 \
-  --iters 100 \
-  --flush-mb 256 \
-  --no-install \
-  --csv benchmark/v8/cp_rank_remainder.csv
+python -B benchmark/v8/prefill_benchmark.py \
+  --tp 8 --cp 8 --all-ranks --batch 1 --new 875
 ```
 
 For `new=875` and `CP=8`, ranks 0-2 receive 110 query tokens and ranks 3-7
-receive 109. Their sum remains 875; the benchmark never silently discards the
-remainder. These ranks are benchmarked sequentially in one process, not as a
-distributed multi-GPU job.
+receive 109. These cases still run sequentially in one process; this standalone
+microbenchmark does not launch a distributed multi-GPU job.
 
 ### Preview without using a GPU
 
@@ -350,16 +278,13 @@ skipped pair, head mapping, rank-local row count, and effective top-k without
 allocating CUDA tensors:
 
 ```bash
-python -B benchmark/v8/mla_fp8_prefill_bench.py \
-  --suite custom --batch 1 8 --new 10000 --cached 90000 \
-  --global-heads 128 --tp 8 --cp 1 2 4 8 --cp-rank 0 \
-  --topk 512 1024 2048 --test v8 --dry-run --csv ""
+python -B benchmark/v8/prefill_benchmark.py --tp --cp --dry-run --csv ""
 ```
 
 The CPU-only benchmark-planner tests are:
 
 ```bash
-python -B -m unittest benchmark.v8.test_mla_fp8_prefill_bench
+python -B -m unittest benchmark.v8.test_prefill_benchmark
 ```
 
 ## 3. Files changed
@@ -376,10 +301,10 @@ pre-existing FP8 development branch:
 | `csrc/api/api.cpp` | Python extension registration for the forward and trace entry points. |
 | `setup.py` | Build registration for the added SM100 CUDA source. |
 | `tests/test_flash_mla_sparse_prefill_fp8_v32_v8.py` | Consolidated H64/H128 correctness, bitwise split comparison, trace, launch-count, and sanitizer test entry points. |
-| `benchmark/v8/mla_fp8_prefill_bench.py` | Standalone benchmark runner and TP/CP/head-shape planner. |
+| `benchmark/v8/prefill_benchmark.py` | Standalone multi-kernel benchmark runner and TP/CP/head-shape planner. |
 | `benchmark/v8/v32_kernelv8_fp8_prefill_fwd_adapter.py` | Adapter from benchmark tensors to the native extension API. |
-| `benchmark/v8/test_mla_fp8_prefill_bench.py` | CPU-only tests for benchmark planning and validation. |
-| `benchmark/v8/README.md`, `benchmark/v8/__init__.py` | Benchmark package notes and package marker. |
+| `benchmark/v8/test_prefill_benchmark.py` | CPU-only tests for benchmark planning and validation. |
+| `benchmark/v8/README.md`, `benchmark/v8/__init__.py`, `benchmark/v8/__main__.py` | Benchmark package notes and module entry point. |
 | `docs/v32_native_fp8_prefill_v8.md` | Detailed English implementation and operating notes. |
 | `docs/v32_native_fp8_prefill_v8_zh-CN.md` | Detailed Simplified Chinese implementation and operating notes. |
 | `README.md` | Build, validation, measured tensor shapes, and benchmark workflows. |

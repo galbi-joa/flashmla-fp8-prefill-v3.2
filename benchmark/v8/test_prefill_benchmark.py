@@ -2,7 +2,7 @@ import io
 from contextlib import redirect_stdout
 import unittest
 
-from benchmark.v8.mla_fp8_prefill_bench import (
+from benchmark.v8.prefill_benchmark import (
     Case,
     TimeResult,
     build_cases,
@@ -11,10 +11,61 @@ from benchmark.v8.mla_fp8_prefill_bench import (
     parse_args,
     print_result_matrix,
     result_row,
+    selected_backends,
 )
 
 
 class ParallelCaseTest(unittest.TestCase):
+    def test_no_arguments_runs_h64_and_h128_for_six_batches(self):
+        args = parse_args([])
+        cases = build_cases(args)
+
+        self.assertEqual(len(cases), 12)
+        self.assertEqual(args.batch, [1, 2, 4, 8, 16, 32])
+        self.assertEqual(args.tp, [2, 1])
+        self.assertEqual(args.cp, [1])
+        self.assertEqual(
+            [(case.batch, case.heads) for case in cases],
+            [
+                (batch, heads)
+                for batch in [1, 2, 4, 8, 16, 32]
+                for heads in [64, 128]
+            ],
+        )
+        self.assertEqual(selected_backends(args), ("decode", "v8"))
+
+    def test_bare_tp_and_cp_select_documented_sweeps(self):
+        tp_args = parse_args(["--tp"])
+        self.assertEqual(tp_args.tp, [1, 2, 4, 8])
+        self.assertEqual(tp_args.cp, [1])
+        self.assertEqual(len(build_cases(tp_args)), 24)
+
+        cp_args = parse_args(["--cp"])
+        self.assertEqual(cp_args.tp, [8])
+        self.assertEqual(cp_args.cp, [1, 2, 4, 8])
+        self.assertEqual(len(build_cases(cp_args)), 24)
+
+        matrix_args = parse_args(["--tp", "--cp"])
+        self.assertEqual(matrix_args.tp, [1, 2, 4, 8])
+        self.assertEqual(matrix_args.cp, [1, 2, 4, 8])
+        self.assertEqual(len(build_cases(matrix_args)), 60)
+
+    def test_comparison_flags_add_to_decode_and_v8(self):
+        args = parse_args(
+            ["--bf16", "--fp8-dequant", "--trtllm", "--decode-chunked"]
+        )
+        self.assertEqual(
+            selected_backends(args),
+            (
+                "decode",
+                "v8",
+                "bf16",
+                "fp8_dequant",
+                "trtllm",
+                "decode_chunked",
+            ),
+        )
+
     def test_fixed_total_tp_cp_sweep_reaches_h128(self):
         args = parse_args(
             [
@@ -341,7 +392,7 @@ class ParallelCaseTest(unittest.TestCase):
             global_heads=128,
             topk=2048,
         )
-        row = result_row(case, TimeResult("native_kernelv8", True, 1.25), 64)
+        row = result_row(case, TimeResult("v8", True, 1.25), 64)
 
         self.assertEqual(row["tp_size"], "8")
         self.assertEqual(row["attention_tp_size"], "4")
@@ -354,7 +405,7 @@ class ParallelCaseTest(unittest.TestCase):
 
         output = io.StringIO()
         with redirect_stdout(output):
-            print_result_matrix([row], {"native_kernelv8"})
+            print_result_matrix([row], {"v8"})
         self.assertIn("1.2500", output.getvalue())
         self.assertIn("Hglobal", output.getvalue())
 
