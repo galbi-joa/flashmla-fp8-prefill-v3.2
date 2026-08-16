@@ -7,7 +7,7 @@ DeepSeek V3.2 KV-cache format, optimized for NVIDIA B200 and B300 GPUs.
 
 - Reads the V3.2 656-byte FP8 KV-cache format directly.
 - Natively supports DeepSeek V3.2 FP8 sparse prefill (H64 and H128) on NVIDIA
-  B200 and B300 GPUs.
+  B200 and B300 GPUs. 
 - Includes numerical correctness, edge-case, launch-audit, and sanitizer tests.
 - Includes standalone single-GPU and physical multi-GPU TP/CP benchmarks.
 
@@ -19,6 +19,17 @@ DeepSeek V3.2 KV-cache format, optimized for NVIDIA B200 and B300 GPUs.
 - Python 3.10 or newer
 - `setuptools`, `wheel`, and `ninja`
 - `kernelkit` when running the numerical correctness tests
+
+## Repository layout
+
+| Path | Purpose |
+| --- | --- |
+| `csrc/sm100/prefill/sparse/fwd_v32_kernelv8.cu` | Native V3.2 FP8 sparse-prefill kernel. |
+| `csrc/api/v32_kernelv8_fp8_prefill_fwd_bridge.h` | PyTorch bridge and H64/H128 dispatch. |
+| `tests/test_flash_mla_sparse_prefill_fp8_v32_v8.py` | Consolidated correctness and validation suite. |
+| `benchmark/v8/prefill_benchmark.py` | Single- and multi-GPU benchmark runner. |
+| `benchmark/v8/test_prefill_benchmark.py` | CPU-only benchmark-planner tests. |
+
 
 ## Build
 
@@ -227,16 +238,6 @@ speedup source=unrounded measurements
 **Repeatability:** max v8 run-to-run delta=1.30%
 
 **Correctness:** H64=22/22 · H128=22/22 · total=44/44 · CUDA/NCCL errors=0
-
-## Repository layout
-
-| Path | Purpose |
-| --- | --- |
-| `csrc/sm100/prefill/sparse/fwd_v32_kernelv8.cu` | Native V3.2 FP8 sparse-prefill kernel. |
-| `csrc/api/v32_kernelv8_fp8_prefill_fwd_bridge.h` | PyTorch bridge and H64/H128 dispatch. |
-| `tests/test_flash_mla_sparse_prefill_fp8_v32_v8.py` | Consolidated correctness and validation suite. |
-| `benchmark/v8/prefill_benchmark.py` | Single- and multi-GPU benchmark runner. |
-| `benchmark/v8/test_prefill_benchmark.py` | CPU-only benchmark-planner tests. |
 
 ---
 
