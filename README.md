@@ -159,14 +159,11 @@ work are outside the timed interval.
 
 ### One GPU: H64 and H128 across batch sizes
 
-H64 was measured on an NVIDIA B200 (50 warmups, 300 timed iterations), while
-H128 was measured on an NVIDIA B300 (10 warmups, 50 timed iterations). H128 is
-implemented as two H64 launches into disjoint output slices. Because the two
-head extents were measured on different GPU models, the columns are independent
-results rather than a hardware-normalized H64-versus-H128 comparison.
+- **H64:** NVIDIA B200 (50 warmups, 300 timed iterations)
+- **H128:** NVIDIA B300 (10 warmups, 50 timed iterations)
 
-Speedup is `(direct FP8 decode - v8) / direct FP8 decode` and is calculated
-from the unrounded measurements.
+**Speedup:** `(direct FP8 decode - v8) / direct FP8 decode`, calculated from
+unrounded measurements.
 
 | Batch | H64 v8 (B200) | H64 direct FP8 decode | H64 v8 vs decode | H128 v8 (B300) | H128 direct FP8 decode | H128 v8 vs decode |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
