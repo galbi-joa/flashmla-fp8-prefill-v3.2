@@ -25,7 +25,7 @@ DeepSeek V3.2 KV-cache format, optimized for NVIDIA B200 and B300 GPUs.
 
 | Path | Purpose |
 | --- | --- |
-| `csrc/sm100/prefill/sparse/fwd_v32_kernelv8.cu` | **Standalone Native V3.2 FP8 sparse-prefill kernel.** |
+| **`csrc/sm100/prefill/sparse/fwd_v32_kernelv8.cu`** | **Standalone Native V3.2 FP8 sparse-prefill kernel.** |
 | `csrc/api/v32_kernelv8_fp8_prefill_fwd_bridge.h` | PyTorch bridge and H64/H128 dispatch. |
 | `tests/test_flash_mla_sparse_prefill_fp8_v32_v8.py` | Consolidated correctness and validation suite. |
 | `benchmark/v8/prefill_benchmark.py` | Single- and multi-GPU benchmark runner. |
