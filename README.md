@@ -165,14 +165,17 @@ implemented as two H64 launches into disjoint output slices. Because the two
 head extents were measured on different GPU models, the columns are independent
 results rather than a hardware-normalized H64-versus-H128 comparison.
 
-| Batch | H64 v8 (B200) | H64 direct FP8 decode | H128 v8 (B300) | H128 direct FP8 decode |
-| ---: | ---: | ---: | ---: | ---: |
-| 1 | **0.3727** | 0.3828 | **0.7076** | 0.7211 |
-| 2 | **0.7301** | 0.7741 | **1.3998** | 1.4940 |
-| 4 | **1.4469** | 1.5556 | **2.7842** | 3.0064 |
-| 8 | **2.8972** | 3.0823 | **5.5491** | 5.9730 |
-| 16 | **5.7469** | N/A | **11.1309** | N/A |
-| 32 | **11.5210** | N/A | **22.3345** | N/A |
+Speedup is `(direct FP8 decode - v8) / direct FP8 decode` and is calculated
+from the unrounded measurements.
+
+| Batch | H64 v8 (B200) | H64 direct FP8 decode | H64 v8 vs decode | H128 v8 (B300) | H128 direct FP8 decode | H128 v8 vs decode |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | **0.3727** | 0.3828 | **2.63% faster** | **0.7076** | 0.7211 | **1.87% faster** |
+| 2 | **0.7301** | 0.7741 | **5.69% faster** | **1.3998** | 1.4940 | **6.30% faster** |
+| 4 | **1.4469** | 1.5556 | **6.99% faster** | **2.7842** | 3.0064 | **7.39% faster** |
+| 8 | **2.8972** | 3.0823 | **6.00% faster** | **5.5491** | 5.9730 | **7.10% faster** |
+| 16 | **5.7469** | N/A | N/A | **11.1309** | N/A | N/A |
+| 32 | **11.5210** | N/A | N/A | **22.3345** | N/A | N/A |
 
 Direct FP8 decode is unavailable at batch 16 and 32 because its folded
 metadata requires 273KiB and 546KiB of shared memory, respectively, exceeding
