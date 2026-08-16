@@ -5,9 +5,10 @@ DeepSeek V3.2 KV-cache format, optimized for NVIDIA B200 and B300 GPUs.
 
 ## Highlights
 
-- Reads the V3.2 656-byte FP8 KV-cache format directly.
 - Natively supports DeepSeek V3.2 FP8 sparse prefill (H64 and H128) on NVIDIA
-  B200 and B300 GPUs. 
+  B200 and B300 GPUs.
+- Delivers up to 7.8% lower kernel latency than FlashMLA's direct FP8
+  decode-as-prefill path in measured workloads.
 - Includes numerical correctness, edge-case, launch-audit, and sanitizer tests.
 - Includes standalone single-GPU and physical multi-GPU TP/CP benchmarks.
 
