@@ -77,32 +77,70 @@ Additional launch-audit and Compute Sanitizer commands are in
 
 ## Benchmark
 
-The default command automatically uses one process on a one-GPU host or one
-NCCL worker per visible GPU on a multi-GPU host:
+Select the scenario that matches the hardware and topology you want to
+measure. If `--gpus` is omitted, the runner uses every visible GPU; the
+examples below select the device count explicitly so that the execution mode
+is unambiguous.
+
+**Quick smoke test — check that the kernel loads and produces timings on one
+GPU.**
 
 ```bash
-PYTHONPATH="$PWD" python -B benchmark/v8/prefill_benchmark.py
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH="$PWD" \
+python -B benchmark/v8/prefill_benchmark.py \
+  --gpus 1 --quick --batch 1 --csv ""
 ```
 
-Useful examples:
+**One GPU — benchmark both H64 and H128 over the canonical batch sweep.** The
+one-GPU runner executes the H64 rank shape first and the H128 rank shape
+second; TP/CP are shape metadata in this mode, not a distributed-performance
+claim.
 
 ```bash
-# Show all options.
-python -B benchmark/v8/prefill_benchmark.py --help
-
-# Preview an eight-GPU CP topology without allocating CUDA tensors.
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH="$PWD" \
 python -B benchmark/v8/prefill_benchmark.py \
-  --dry-run --gpus 8 --cp --csv ""
+  --gpus 1 \
+  --batch 1 2 4 8 16 32 \
+  --new 875 --cached 69125 --topk 2048 \
+  --warmup 10 --iters 50 --flush-mb 256 \
+  --csv benchmark/v8/results_1gpu.csv
+```
 
-# Run physical TP=8 with CP=1,2,4,8 on an eight-GPU host.
-python -B benchmark/v8/prefill_benchmark.py --gpus 8 --cp
+**Two GPUs — measure physical TP2/CP1 and TP2/CP2 with one NCCL worker per
+GPU.** `CP=1` gives pure attention TP with H64 per rank. `CP=2` gives the DSA
+CP endpoint with H128 and approximately half the query rows per rank.
 
-# Add optional comparison paths.
+```bash
+CUDA_VISIBLE_DEVICES=0,1 PYTHONPATH="$PWD" \
 python -B benchmark/v8/prefill_benchmark.py \
+  --gpus 2 --tp 2 --cp 1 2 \
+  --batch 1 2 4 8 16 32 \
+  --new 875 --cached 69125 --topk 2048 \
+  --warmup 10 --iters 50 --flush-mb 256 \
+  --csv benchmark/v8/results_2gpu_tp_cp.csv
+```
+
+**Preview a topology — inspect rank shapes and padding without allocating CUDA
+tensors.**
+
+```bash
+python -B benchmark/v8/prefill_benchmark.py \
+  --dry-run --gpus 2 --tp 2 --cp 1 2 \
+  --batch 1 2 4 8 16 32 --csv ""
+```
+
+**Compare optional backends — add BF16 prefill, FP8-cache dequantization plus
+BF16 prefill, TRTLLM-GEN, and the chunked decode floor.**
+
+```bash
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH="$PWD" \
+python -B benchmark/v8/prefill_benchmark.py \
+  --gpus 1 --batch 1 8 \
   --bf16 --fp8-dequant --trtllm --decode-chunked
 ```
 
-The equivalent short module command is:
+Use `python -B benchmark/v8/prefill_benchmark.py --help` to list every option.
+The equivalent short module command for the default scenario is:
 
 ```bash
 python -m benchmark.v8
@@ -110,6 +148,65 @@ python -m benchmark.v8
 
 See the appendices below for tensor contracts, H128 launch details, distributed
 topology, timing boundaries, and advanced benchmark options.
+
+## Benchmark Result
+
+All values below are kernel latency in milliseconds. The common workload is
+DeepSeek V3.2 FP8 KV with 875 new tokens per request, 69,125 cached tokens,
+KV length 70,000, and top-k 2,048. Each timed iteration uses a 256MiB L2 flush.
+Input generation, KV quantization, sparse-index construction, and full-model
+work are outside the timed interval.
+
+### One GPU: H64 and H128 across batch sizes
+
+H64 was measured on an NVIDIA B200 (50 warmups, 300 timed iterations), while
+H128 was measured on an NVIDIA B300 (10 warmups, 50 timed iterations). H128 is
+implemented as two H64 launches into disjoint output slices. Because the two
+head extents were measured on different GPU models, the columns are independent
+results rather than a hardware-normalized H64-versus-H128 comparison.
+
+| Batch | H64 v8 (B200) | H64 direct FP8 decode | H128 v8 (B300) | H128 direct FP8 decode |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | **0.3727** | 0.3828 | **0.7076** | 0.7211 |
+| 2 | **0.7301** | 0.7741 | **1.3998** | 1.4940 |
+| 4 | **1.4469** | 1.5556 | **2.7842** | 3.0064 |
+| 8 | **2.8972** | 3.0823 | **5.5491** | 5.9730 |
+| 16 | **5.7469** | N/A | **11.1309** | N/A |
+| 32 | **11.5210** | N/A | **22.3345** | N/A |
+
+Direct FP8 decode is unavailable at batch 16 and 32 because its folded
+metadata requires 273KiB and 546KiB of shared memory, respectively, exceeding
+the 227KiB device limit. The v8 prefill kernel completes both cases.
+
+### Two GPUs: physical TP/CP
+
+The physical run used two NV18-connected NVIDIA B300 SXM6 GPUs with one NCCL
+worker per GPU. Global H128 was mapped to the two measured topologies as
+follows:
+
+| Topology | TP | Attention TP | CP | Local H | Execution H | Query work per rank |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| TP2/CP1 | 2 | 2 | 1 | 64 | 64 | All flattened query rows |
+| TP2/CP2 | 2 | 1 | 2 | 128 | 128 | Approximately half the query rows |
+
+The table reports the average of two independent physical runs. Distributed
+latency is the median of the iteration-wise maximum rank latency. Scaling uses
+the one-GPU B300 H128 latency as the numerator.
+
+| Batch | 1-GPU H128 | TP2/CP1 H64 | Scaling | TP2/CP2 H128 | Scaling |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.7076 | **0.3692** | 1.916x | **0.3743** | 1.890x |
+| 2 | 1.3998 | **0.7152** | 1.957x | **0.7213** | 1.941x |
+| 4 | 2.7842 | **1.4067** | 1.979x | **1.4129** | 1.971x |
+| 8 | 5.5491 | **2.7912** | 1.988x | **2.7969** | 1.984x |
+| 16 | 11.1309 | **5.5018** | 2.023x | **5.5600** | 2.002x |
+| 32 | 22.3345 | **10.9833** | 2.034x | **10.9983** | 2.031x |
+
+Geometric-mean scaling is **1.9826x** for TP2/CP1 and **1.9692x** for
+TP2/CP2. TP2/CP2 kernel latency is 0.68% higher than TP2/CP1 on a geometric
+mean basis, and the maximum v8 difference between the two repeated runs is
+1.30%. Both GPUs independently passed 11 H64 and 11 H128 correctness cases
+(44/44 total), with no CUDA or NCCL errors.
 
 ## Repository layout
 
