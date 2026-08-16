@@ -58,7 +58,7 @@ python -m pip install -v --no-build-isolation .
 
 ## Validate
 
-Run the complete H64/H128 numerical suite:
+**Numerical suite — H=64/128 · cases=all**
 
 ```bash
 PYTHONPATH="$PWD" python -B \
@@ -66,24 +66,20 @@ PYTHONPATH="$PWD" python -B \
   --heads all --case all
 ```
 
-Run the CPU-only benchmark-planner tests:
+**Planner tests — device=CPU · runner=unittest**
 
 ```bash
 python -B -m unittest benchmark.v8.test_prefill_benchmark
 ```
 
-Additional launch-audit and Compute Sanitizer commands are in
-[Appendix D](#appendix-d-advanced-validation).
+**More:** [launch audit + Compute Sanitizer](#appendix-d-advanced-validation)
 
 ## Benchmark
 
-Select the scenario that matches the hardware and topology you want to
-measure. If `--gpus` is omitted, the runner uses every visible GPU; the
-examples below select the device count explicitly so that the execution mode
-is unambiguous.
+**GPU selection:** `--gpus 1` = local 1-GPU mode · `--gpus N` (`N >= 2`) =
+physical N-GPU mode · omitted = all visible GPUs
 
-**Quick smoke test — check that the kernel loads and produces timings on one
-GPU.**
+**Smoke — GPU=1 · B=1 · warmup=2 · iters=5 · CSV=off**
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 PYTHONPATH="$PWD" \
@@ -91,10 +87,8 @@ python -B benchmark/v8/prefill_benchmark.py \
   --gpus 1 --quick --batch 1 --csv ""
 ```
 
-**One GPU — benchmark both H64 and H128 over the canonical batch sweep.** The
-one-GPU runner executes the H64 rank shape first and the H128 rank shape
-second; TP/CP are shape metadata in this mode, not a distributed-performance
-claim.
+**1 GPU — H64=(TPshape=2, CPshape=1) · H128=(TPshape=1, CPshape=1) ·
+B=1/2/4/8/16/32 · NCCL workers=0**
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 PYTHONPATH="$PWD" \
@@ -106,9 +100,10 @@ python -B benchmark/v8/prefill_benchmark.py \
   --csv benchmark/v8/results_1gpu.csv
 ```
 
-**Two GPUs — measure physical TP2/CP1 and TP2/CP2 with one NCCL worker per
-GPU.** `CP=1` gives pure attention TP with H64 per rank. `CP=2` gives the DSA
-CP endpoint with H128 and approximately half the query rows per rank.
+**2 GPUs — TP=2 · CP=1/2 · B=1/2/4/8/16/32 · NCCL workers=2**
+
+- `CP=1`: attention TP=2 · H/GPU=64 · B1 rows/rank=876
+- `CP=2`: attention TP=1 · H/GPU=128 · B1 rows/rank=438
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 PYTHONPATH="$PWD" \
@@ -120,8 +115,7 @@ python -B benchmark/v8/prefill_benchmark.py \
   --csv benchmark/v8/results_2gpu_tp_cp.csv
 ```
 
-**Preview a topology — inspect rank shapes and padding without allocating CUDA
-tensors.**
+**Dry run — GPU=2 · TP=2 · CP=1/2 · CUDA allocations=0**
 
 ```bash
 python -B benchmark/v8/prefill_benchmark.py \
@@ -129,8 +123,7 @@ python -B benchmark/v8/prefill_benchmark.py \
   --batch 1 2 4 8 16 32 --csv ""
 ```
 
-**Compare optional backends — add BF16 prefill, FP8-cache dequantization plus
-BF16 prefill, TRTLLM-GEN, and the chunked decode floor.**
+**Optional backends — BF16 · FP8-dequant+BF16 · TRTLLM-GEN · decode-chunked**
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 PYTHONPATH="$PWD" \
@@ -139,58 +132,72 @@ python -B benchmark/v8/prefill_benchmark.py \
   --bf16 --fp8-dequant --trtllm --decode-chunked
 ```
 
-Use `python -B benchmark/v8/prefill_benchmark.py --help` to list every option.
-The equivalent short module command for the default scenario is:
+**Help:** `python -B benchmark/v8/prefill_benchmark.py --help`
+
+**Default short form:**
 
 ```bash
 python -m benchmark.v8
 ```
 
-See the appendices below for tensor contracts, H128 launch details, distributed
-topology, timing boundaries, and advanced benchmark options.
+**Details:** [tensor contract](#appendix-a-kernel-and-tensor-contract) ·
+[TP/CP topology](#appendix-b-benchmark-topology) ·
+[timing scope](#appendix-c-measurement-scope) ·
+[advanced commands](#appendix-e-advanced-benchmark-commands)
 
 ## Benchmark Result
 
-All values below are kernel latency in milliseconds. The common workload is
-DeepSeek V3.2 FP8 KV with 875 new tokens per request, 69,125 cached tokens,
-KV length 70,000, and top-k 2,048. Each timed iteration uses a 256MiB L2 flush.
-Input generation, KV quantization, sparse-index construction, and full-model
-work are outside the timed interval.
+| Setting | Value |
+| --- | --- |
+| KV layout | DeepSeek V3.2 FP8, 656B/token |
+| New tokens | 875/request |
+| Cached tokens | 69,125 |
+| KV length | 70,000 |
+| Top-k | 2,048 |
+| Reported latency | Kernel, milliseconds |
+| L2 flush | 256MiB/iteration |
+| Timed | Kernel only |
+| Excluded | Input generation, KV quantization, sparse-index construction, full model |
 
-### One GPU: H64 and H128 across batch sizes
+### 1 GPU: H64 and H128
 
-- **H64:** NVIDIA B200 (50 warmups, 300 timed iterations)
-- **H128:** NVIDIA B300 (10 warmups, 50 timed iterations)
+**Speedup:** `(direct FP8 decode - v8) / direct FP8 decode` · source=unrounded
+measurements
 
-**Speedup:** `(direct FP8 decode - v8) / direct FP8 decode`, calculated from
-unrounded measurements.
+**H64 — NVIDIA B200 · warmup=50 · iters=300**
 
-| Batch | H64 v8 (B200) | H64 direct FP8 decode | H64 v8 vs decode | H128 v8 (B300) | H128 direct FP8 decode | H128 v8 vs decode |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | **0.3727** | 0.3828 | **2.63% faster** | **0.7076** | 0.7211 | **1.87% faster** |
-| 2 | **0.7301** | 0.7741 | **5.69% faster** | **1.3998** | 1.4940 | **6.30% faster** |
-| 4 | **1.4469** | 1.5556 | **6.99% faster** | **2.7842** | 3.0064 | **7.39% faster** |
-| 8 | **2.8972** | 3.0823 | **6.00% faster** | **5.5491** | 5.9730 | **7.10% faster** |
-| 16 | **5.7469** | N/A | N/A | **11.1309** | N/A | N/A |
-| 32 | **11.5210** | N/A | N/A | **22.3345** | N/A | N/A |
+| Batch | Direct FP8 decode | v8 prefill | v8 vs decode |
+| ---: | ---: | ---: | ---: |
+| 1 | 0.3828 | **0.3727** | **2.63% faster** |
+| 2 | 0.7741 | **0.7301** | **5.69% faster** |
+| 4 | 1.5556 | **1.4469** | **6.99% faster** |
+| 8 | 3.0823 | **2.8972** | **6.00% faster** |
+| 16 | N/A | **5.7469** | N/A |
+| 32 | N/A | **11.5210** | N/A |
 
-Direct FP8 decode is unavailable at batch 16 and 32 because its folded
-metadata requires 273KiB and 546KiB of shared memory, respectively, exceeding
-the 227KiB device limit. The v8 prefill kernel completes both cases.
+**H128 — NVIDIA B300 · warmup=10 · iters=50**
 
-### Two GPUs: physical TP/CP
+| Batch | Direct FP8 decode | v8 prefill | v8 vs decode |
+| ---: | ---: | ---: | ---: |
+| 1 | 0.7211 | **0.7076** | **1.87% faster** |
+| 2 | 1.4940 | **1.3998** | **6.30% faster** |
+| 4 | 3.0064 | **2.7842** | **7.39% faster** |
+| 8 | 5.9730 | **5.5491** | **7.10% faster** |
+| 16 | N/A | **11.1309** | N/A |
+| 32 | N/A | **22.3345** | N/A |
 
-The physical run used two NV18-connected NVIDIA B300 SXM6 GPUs with one NCCL
-worker per GPU. Global H128 was mapped to the two measured topologies as
-follows:
+**Decode N/A:** B16=273KiB · B32=546KiB · SMEM limit=227KiB · v8=PASS
 
-- `TP2/CP1`: pure attention TP, H64 per GPU, all query rows per rank.
-- `TP2/CP2`: CP endpoint, H128 per GPU, approximately half the query rows per
-  rank.
+### 2 GPUs: physical TP/CP
 
-Results are the average of two independent physical runs. Distributed latency
-is the median of the iteration-wise maximum rank latency. Speedup is calculated
-from the unrounded measurements.
+**Hardware:** GPU=2× NVIDIA B300 SXM6 · interconnect=NV18 · NCCL workers=2 ·
+global H=128
+
+- `TP2/CP1`: attention TP=2 · H/GPU=64 · B1 rows/rank=876
+- `TP2/CP2`: attention TP=1 · H/GPU=128 · B1 rows/rank=438
+
+**Aggregation:** runs=2 (mean) · latency=p50(iteration-wise rank max) ·
+speedup source=unrounded measurements
 
 **TP2/CP1 — H64 per GPU**
 
@@ -214,11 +221,11 @@ from the unrounded measurements.
 | 16 | 5.9956 | **5.5600** | **7.27% faster** |
 | 32 | N/A | **10.9983** | N/A |
 
-Direct FP8 decode is N/A at TP2/CP1 batch 16/32 and TP2/CP2 batch 32 because
-its metadata exceeds the 227KiB shared-memory limit. The v8 kernel completes
-all cases. The maximum v8 difference between the two repeated runs is 1.30%.
-Both GPUs independently passed 11 H64 and 11 H128 correctness cases (44/44
-total), with no CUDA or NCCL errors.
+**Decode N/A:** TP2/CP1 B16/B32 · TP2/CP2 B32 · SMEM limit=227KiB · v8=PASS
+
+**Repeatability:** max v8 run-to-run delta=1.30%
+
+**Correctness:** H64=22/22 · H128=22/22 · total=44/44 · CUDA/NCCL errors=0
 
 ## Repository layout
 
@@ -245,7 +252,7 @@ For one benchmark case, setup creates the following tensors before timing:
 | Max logits | `[rows, Hexec]` | FP32 |
 | LSE | `[rows, Hexec]` | FP32 |
 
-The fixed execution contract is:
+**Fixed execution:**
 
 - query/key dimension: `d_qk = 576`
 - value/output dimension: `d_v = 512`
@@ -253,35 +260,34 @@ The fixed execution contract is:
 - KV-cache storage: 656 bytes per token
 - supported execution head extents: H64 and H128
 
-The CUDA kernel computes 64 query heads per launch. H64 uses one launch. H128
-allocates full-shape `out`, `max_logits`, and `lse` tensors and launches the H64
-kernel twice into disjoint head slices. It does not concatenate outputs or run
-a combine kernel, D2D copy, or cross-head reduction.
+| Hexec | Native launches | Output head slices |
+| ---: | ---: | --- |
+| 64 | 1 | `[0:64]` |
+| 128 | 2 | `[0:64]`, `[64:128]` |
 
-`batch` is represented by flattening query tokens into `rows`. Each process
-uses one visible KV pool of length `cached + new`; it does not allocate a
-separate KV pool per batch item. Physical CP applies SGLang-compatible padding
-and rank partitioning to the flattened query-token stream.
+**H128 extras:** concat=0 · combine kernels=0 · D2D copies=0 · cross-head
+reductions=0
+
+**Batch/row mapping:** rows=`batch * new` · KV pools/process=1 · KV pool
+length=`cached + new` · physical CP=SGLang padding + rank partition
 
 ## Appendix B: Benchmark topology
 
 ### Automatic execution mode
 
-- With one visible GPU, the benchmark runs local H64/H128 kernel shapes. TP/CP
-  values are shape metadata rather than a distributed-performance claim.
-- With `N >= 2` visible GPUs, the benchmark relaunches through
-  `torch.distributed.run`, assigns one NCCL worker per GPU, and uses `TP=N`.
-- The physical default runs pure attention TP `(TP=N, CP=1)` and the current
-  DP=1 DSA-CP endpoint `(TP=N, CP=N)`.
-- `--gpus N` selects the first `N` visible devices. `--gpus 1` forces the local
-  one-GPU path.
+| Visible GPUs | Processes | NCCL workers | TP | Default CP | Mode |
+| ---: | ---: | ---: | --- | --- | --- |
+| 1 | 1 | 0 | 2 (H64) / 1 (H128), shape-only | 1 | Local H64/H128 |
+| N (`N >= 2`) | N | N | N | 1 or N | Physical TP + CP endpoint |
 
-The automatic launcher is single-node. All participating devices must be
-SM100 B200/B300 GPUs, and a physical job requires `WORLD_SIZE == TP`.
+**Selection:** `--gpus N` = first N visible devices · `--gpus 1` = force local
+mode
+
+**Physical constraints:** nodes=1 · `WORLD_SIZE=TP=N` · GPU=SM100 B200/B300
 
 ### Rank layout
 
-The physical rank mapping is:
+**Rank mapping:**
 
 ```text
 attention_tp      = TP / CP
@@ -293,7 +299,7 @@ Hexec = 64   when 1 <= Hlocal <= 64
         128  when 65 <= Hlocal <= 128
 ```
 
-Physical CP uses the following flattened padding and partitioning rule:
+**CP padding/partition:**
 
 ```text
 Tlogical  = batch * new
@@ -306,35 +312,31 @@ kv_len         = cached + new
 topk_effective = floor(min(topk, kv_len) / 64) * 64
 ```
 
-For example, `batch=1`, `new=875`, and `TP=CP=8` pad the stream to
-880 tokens. Every rank executes 110 rows; ranks 0-2 have 110 logical rows,
-while ranks 3-7 have 109 logical rows and one dummy row.
+**Padding example:** B=1 · new=875 · TP=8 · CP=8 · Tlogical=875 · Tpadded=880 ·
+rows/rank=110 · rank 0-2=`logical 110 + pad 0` · rank 3-7=`logical 109 + pad 1`
 
-Smaller local-head counts are padded to the supported H64 or H128 execution
-bucket. The CSV records logical and execution head counts separately.
+**Head padding:** Hlocal=[1,64] -> Hexec=64 · Hlocal=[65,128] -> Hexec=128 ·
+CSV fields=`local_heads, execution_heads`
 
 ### Topology status
 
-- `CP=1` is the pure-TP path.
-- Current DP=1 DSA CP uses the `CP=TP` endpoint.
-- Intermediate factorizations such as `TP=8, CP=2/4` are real distributed
-  measurements but are marked `experimental-tp-cp`.
-- Endpoints beyond the current single-node DSA limit are marked
-  `experimental-dsa-cp-over-8`.
+- `CP=1` -> `production-pure-tp`
+- `DP=1, CP=TP` -> `sglang-dsa-cp-endpoint`
+- `1 < CP < TP` (example: `TP=8, CP=2/4`) -> `experimental-tp-cp`
+- `CP > 8` -> `experimental-dsa-cp-over-8`
 
 ## Appendix C: Measurement scope
 
-Input generation, KV quantization, and sparse-index construction are outside
-the timed interval. Each iteration flushes the requested L2-sized buffer before
-the start event, and the flush itself is excluded from elapsed time.
+**Timed contribution:** input generation=0 · KV quantization=0 · sparse-index
+construction=0 · process-group setup=0 · synchronization=0 · error
+coordination=0 · result reduction=0
 
-In physical jobs, iterations are start-aligned across ranks. Kernel latency is
-reported as the median of the iteration-wise maximum rank latency. Process
-group setup, synchronization, error coordination, and result reduction remain
-outside the kernel interval.
+**L2 flush:** before start event · elapsed-time contribution=0
 
-The distributed communication columns are scoped probes, not full-layer or
-SGLang end-to-end latency:
+**Physical aggregation:** start-aligned ranks ·
+latency=p50(iteration-wise rank max)
+
+**Communication metric scope:** probe=1 · full layer=0 · SGLang end-to-end=0
 
 | Metric | Timed boundary |
 | --- | --- |
@@ -343,18 +345,16 @@ SGLang end-to-end latency:
 | `cp_allgather_probe_plus_kernel_ms` | The CP probe followed by the selected kernel on one CUDA stream. |
 | `tp_o_proj_allreduce_probe_ms` | NCCL all-reduce of a correctly shaped post-`o_proj` BF16 payload. |
 
-The benchmark does not all-reduce raw head-sharded attention output and does
-not reconstruct distributed numerical output after trimming dummy token/head
-padding. Projection GEMMs, indexer/top-k work, MLP communication, cached-prefix
-gather, and model-final output gather are not included.
+**Not included:** raw attention-output all-reduce · distributed output
+reconstruction · projection GEMMs · indexer/top-k · MLP communication ·
+cached-prefix gather · model-final output gather
 
-Runtime failures are coordinated through a Gloo control group. NCCL groups use
-a 120-second timeout, and the automatic launcher uses a two-hour whole-job
-watchdog. Set `MLA_PREFILL_BENCH_WATCHDOG_SECONDS` to override the latter.
+**Control/timeouts:** error group=Gloo · NCCL timeout=120s · launcher
+watchdog=7,200s · override=`MLA_PREFILL_BENCH_WATCHDOG_SECONDS`
 
 ## Appendix D: Advanced validation
 
-Audit the H64/H128 launch topology with Torch Profiler/CUPTI:
+**CUPTI audit — H=128 · case=edge · launch-only=1**
 
 ```bash
 PYTHONPATH="$PWD" python -B \
@@ -363,10 +363,10 @@ PYTHONPATH="$PWD" python -B \
   --trace-json /tmp/v8_h128_launches.json
 ```
 
-The audit expects one native-kernel activity for H64 and two for H128. It also
-rejects CUDA combine/copy/memset activity or `aten::cat` inside the API interval.
+**Expected audit:** H64 native launches=1 · H128 native launches=2 · CUDA
+combine/copy/memset=0 · `aten::cat`=0
 
-Run a minimal Compute Sanitizer check:
+**Compute Sanitizer — tool=memcheck · H=128 · case=edge · launch-only=1**
 
 ```bash
 CUDA_LAUNCH_BLOCKING=1 PYTHONPATH="$PWD" \
@@ -377,7 +377,7 @@ compute-sanitizer --tool memcheck --error-exitcode=1 \
 
 ## Appendix E: Advanced benchmark commands
 
-On a one-GPU host, the following commands simulate TP/CP shapes:
+**1 GPU — TP/CP shape simulation:**
 
 ```bash
 python -B benchmark/v8/prefill_benchmark.py --tp
@@ -385,7 +385,8 @@ python -B benchmark/v8/prefill_benchmark.py --cp
 python -B benchmark/v8/prefill_benchmark.py --tp --cp
 ```
 
-Run an explicit matrix:
+**Matrix — TP=8 · CP=1/2/4/8 · B=1/8 · new=10,000 · cached=90,000 ·
+top-k=512/1,024/2,048:**
 
 ```bash
 python -B benchmark/v8/prefill_benchmark.py \
@@ -395,12 +396,12 @@ python -B benchmark/v8/prefill_benchmark.py \
   --topk 512 1024 2048
 ```
 
-Inspect every simulated CP rank:
+**All simulated ranks — TP=8 · CP=8 · B=1 · new=875:**
 
 ```bash
 python -B benchmark/v8/prefill_benchmark.py \
   --tp 8 --cp 8 --all-ranks --batch 1 --new 875
 ```
 
-In a physical job, CP rank is derived from the process topology, so
-`--cp-rank` and `--all-ranks` are rejected.
+**Physical mode:** CP rank=process topology · `--cp-rank`=rejected ·
+`--all-ranks`=rejected
