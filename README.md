@@ -1,12 +1,13 @@
-# Native FP8 Sparse Prefill for DeepSeek V3.2
+# FlashMLA: Native FP8 Sparse Prefill for DeepSeek V3.2
 
-This repository adds an SM100 sparse-prefill path for the DeepSeek V3.2 FP8
-KV-cache format to FlashMLA.
+This FlashMLA extension provides a native FP8 sparse-prefill kernel for the
+DeepSeek V3.2 KV-cache format, optimized for NVIDIA B200 and B300 GPUs.
 
 ## Highlights
 
 - Reads the V3.2 656-byte FP8 KV-cache format directly.
-- Supports H64 and H128 execution on NVIDIA B200 and B300 GPUs.
+- Natively supports DeepSeek V3.2 FP8 sparse prefill (H64 and H128) on NVIDIA
+  B200 and B300 GPUs.
 - Includes numerical correctness, edge-case, launch-audit, and sanitizer tests.
 - Includes standalone single-GPU and physical multi-GPU TP/CP benchmarks.
 
