@@ -187,29 +187,41 @@ The physical run used two NV18-connected NVIDIA B300 SXM6 GPUs with one NCCL
 worker per GPU. Global H128 was mapped to the two measured topologies as
 follows:
 
-| Topology | TP | Attention TP | CP | Local H | Execution H | Query work per rank |
-| --- | ---: | ---: | ---: | ---: | ---: | --- |
-| TP2/CP1 | 2 | 2 | 1 | 64 | 64 | All flattened query rows |
-| TP2/CP2 | 2 | 1 | 2 | 128 | 128 | Approximately half the query rows |
+- `TP2/CP1`: pure attention TP, H64 per GPU, all query rows per rank.
+- `TP2/CP2`: CP endpoint, H128 per GPU, approximately half the query rows per
+  rank.
 
-The table reports the average of two independent physical runs. Distributed
-latency is the median of the iteration-wise maximum rank latency. Scaling uses
-the one-GPU B300 H128 latency as the numerator.
+Results are the average of two independent physical runs. Distributed latency
+is the median of the iteration-wise maximum rank latency. Speedup is calculated
+from the unrounded measurements.
 
-| Batch | 1-GPU H128 | TP2/CP1 H64 | Scaling | TP2/CP2 H128 | Scaling |
-| ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 0.7076 | **0.3692** | 1.916x | **0.3743** | 1.890x |
-| 2 | 1.3998 | **0.7152** | 1.957x | **0.7213** | 1.941x |
-| 4 | 2.7842 | **1.4067** | 1.979x | **1.4129** | 1.971x |
-| 8 | 5.5491 | **2.7912** | 1.988x | **2.7969** | 1.984x |
-| 16 | 11.1309 | **5.5018** | 2.023x | **5.5600** | 2.002x |
-| 32 | 22.3345 | **10.9833** | 2.034x | **10.9983** | 2.031x |
+**TP2/CP1 — H64 per GPU**
 
-Geometric-mean scaling is **1.9826x** for TP2/CP1 and **1.9692x** for
-TP2/CP2. TP2/CP2 kernel latency is 0.68% higher than TP2/CP1 on a geometric
-mean basis, and the maximum v8 difference between the two repeated runs is
-1.30%. Both GPUs independently passed 11 H64 and 11 H128 correctness cases
-(44/44 total), with no CUDA or NCCL errors.
+| Batch | Direct FP8 decode | v8 prefill | v8 vs decode |
+| ---: | ---: | ---: | ---: |
+| 1 | 0.3812 | **0.3692** | **3.15% faster** |
+| 2 | 0.7676 | **0.7152** | **6.84% faster** |
+| 4 | 1.5256 | **1.4067** | **7.80% faster** |
+| 8 | 3.0099 | **2.7912** | **7.27% faster** |
+| 16 | N/A | **5.5018** | N/A |
+| 32 | N/A | **10.9833** | N/A |
+
+**TP2/CP2 — H128 per GPU**
+
+| Batch | Direct FP8 decode | v8 prefill | v8 vs decode |
+| ---: | ---: | ---: | ---: |
+| 1 | 0.3895 | **0.3743** | **3.91% faster** |
+| 2 | 0.7406 | **0.7213** | **2.61% faster** |
+| 4 | 1.5129 | **1.4129** | **6.61% faster** |
+| 8 | 3.0266 | **2.7969** | **7.59% faster** |
+| 16 | 5.9956 | **5.5600** | **7.27% faster** |
+| 32 | N/A | **10.9983** | N/A |
+
+Direct FP8 decode is N/A at TP2/CP1 batch 16/32 and TP2/CP2 batch 32 because
+its metadata exceeds the 227KiB shared-memory limit. The v8 kernel completes
+all cases. The maximum v8 difference between the two repeated runs is 1.30%.
+Both GPUs independently passed 11 H64 and 11 H128 correctness cases (44/44
+total), with no CUDA or NCCL errors.
 
 ## Repository layout
 
