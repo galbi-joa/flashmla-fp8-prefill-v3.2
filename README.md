@@ -32,6 +32,7 @@ DeepSeek V3.2 KV-cache format, optimized for NVIDIA B200 and B300 GPUs.
 | `tests/test_flash_mla_sparse_prefill_fp8_v32_v8.py` | Consolidated correctness and validation suite. |
 | `benchmark/v8/prefill_benchmark.py` | Single- and multi-GPU benchmark runner. |
 | `benchmark/v8/test_prefill_benchmark.py` | CPU-only benchmark-planner tests. |
+| `scripts/detect_cuda_home.py` | Selects a compatible CUDA Toolkit (`nvcc >= 12.9`). |
 
 ## Build
 
@@ -79,15 +80,8 @@ assert torch.cuda.is_available(), "PyTorch cannot access a CUDA GPU"
 assert torch.version.cuda and torch.version.cuda.startswith("13.0")
 PY
 
-if [ -x /usr/local/cuda-13.0/bin/nvcc ]; then
-  export CUDA_HOME=/usr/local/cuda-13.0
-elif command -v nvcc >/dev/null 2>&1; then
-  export CUDA_HOME="$(dirname "$(dirname "$(readlink -f "$(command -v nvcc)")")")"
-else
-  echo "nvcc was not found. Install CUDA Toolkit 13.0 before building." >&2
-  exit 1
-fi
-
+CUDA_HOME="$(python3 scripts/detect_cuda_home.py)" || exit 1
+export CUDA_HOME
 export PATH="$CUDA_HOME/bin:$PATH"
 export FLASH_MLA_DISABLE_SM90=1
 export NVCC_THREADS=8
