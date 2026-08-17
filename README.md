@@ -17,7 +17,7 @@ DeepSeek V3.2 KV-cache format, optimized for NVIDIA B200 and B300 GPUs.
 ## Requirements
 
 - NVIDIA B200 or B300 (`SM100f`)
-- CUDA 12.9 or newer
+- CUDA Toolkit 12.9 or newer, including `nvcc`
 - CUDA-enabled PyTorch built for the installed CUDA toolkit
 - Python 3.10 or newer
 - `setuptools`, `wheel`, and `ninja`
@@ -46,6 +46,19 @@ apt-get install -y python3-venv python3-dev build-essential git
 If `python3 -m venv` still reports that `ensurepip` is unavailable, install the
 version-matched package, such as `python3.12-venv` for Python 3.12.
 
+The PyTorch CUDA wheel includes the CUDA runtime libraries, but it does not
+include the `nvcc` compiler required to build this extension. Install CUDA
+Toolkit 13.0 separately. If the NVIDIA CUDA APT repository is already
+configured, use:
+
+```bash
+apt-get update
+apt-get install -y cuda-toolkit-13-0
+```
+
+Otherwise, configure the repository by following NVIDIA's
+[CUDA Installation Guide for Linux](https://docs.nvidia.com/cuda/archive/13.0.0/cuda-installation-guide-linux/index.html).
+
 ```bash
 git clone https://github.com/galbi-joa/flashmla-fp8-prefill-v3.2.git
 cd flashmla-fp8-prefill-v3.2
@@ -53,7 +66,7 @@ git submodule update --init --recursive
 
 python3 -m venv --clear .venv
 source .venv/bin/activate
-python3 -m pip install --upgrade pip setuptools wheel ninja
+python3 -m pip install --upgrade pip setuptools wheel ninja numpy
 python3 -m pip install torch==2.12.1 \
   --index-url https://download.pytorch.org/whl/cu130
 
@@ -66,7 +79,15 @@ assert torch.cuda.is_available(), "PyTorch cannot access a CUDA GPU"
 assert torch.version.cuda and torch.version.cuda.startswith("13.0")
 PY
 
-export CUDA_HOME=/usr/local/cuda-13.0
+if [ -x /usr/local/cuda-13.0/bin/nvcc ]; then
+  export CUDA_HOME=/usr/local/cuda-13.0
+elif command -v nvcc >/dev/null 2>&1; then
+  export CUDA_HOME="$(dirname "$(dirname "$(readlink -f "$(command -v nvcc)")")")"
+else
+  echo "nvcc was not found. Install CUDA Toolkit 13.0 before building." >&2
+  exit 1
+fi
+
 export PATH="$CUDA_HOME/bin:$PATH"
 export FLASH_MLA_DISABLE_SM90=1
 export NVCC_THREADS=8
