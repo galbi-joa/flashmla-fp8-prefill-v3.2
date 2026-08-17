@@ -11,7 +11,7 @@ DeepSeek V3.2 KV-cache format, optimized for NVIDIA B200 and B300 GPUs.
   decode-as-prefill path in measured workloads.
 - Includes numerical correctness, edge-case, launch-audit, and sanitizer tests.
 - Includes standalone single-GPU and physical multi-GPU TP/CP benchmarks.
-- ** 算子 write up [technical report](docs/3.2_sm100_native_prefill_explain.md).**
+- **算子 write up [technical report](docs/3.2_sm100_native_prefill_explain.md).**
 
 ## Requirements
 
