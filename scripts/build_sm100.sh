@@ -64,3 +64,6 @@ export MAX_JOBS="${MAX_JOBS:-8}"
 
 echo "Building with CUDA_HOME=$CUDA_HOME, NVCC_THREADS=$NVCC_THREADS, MAX_JOBS=$MAX_JOBS"
 python3 setup.py build_ext --inplace -v
+
+echo "Build complete. Run with .venv/bin/python3, or activate it with:"
+echo "  source .venv/bin/activate"

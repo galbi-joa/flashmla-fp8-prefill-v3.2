@@ -81,10 +81,14 @@ without closing the SSH session. To reduce build parallelism, use:
 NVCC_THREADS=4 MAX_JOBS=4 bash scripts/build_sm100.sh
 ```
 
+The script creates `.venv` inside a child shell and cannot activate it in the
+parent SSH shell. The commands below use `.venv/bin/python3` explicitly. To use
+the shorter `python3` command instead, run `source .venv/bin/activate` first.
+
 Verify that Python loads the extension from this checkout:
 
 ```bash
-PYTHONPATH="$PWD" python3 - <<'PY'
+PYTHONPATH="$PWD" .venv/bin/python3 - <<'PY'
 import flash_mla.cuda as cuda
 
 print(cuda.__file__)
@@ -95,7 +99,7 @@ PY
 To install the package instead, keep the same build environment and run:
 
 ```bash
-python3 -m pip install -v --no-build-isolation .
+.venv/bin/python3 -m pip install -v --no-build-isolation .
 ```
 
 ## Validate
@@ -103,7 +107,7 @@ python3 -m pip install -v --no-build-isolation .
 **Numerical suite — H=64/128 · cases=all**
 
 ```bash
-PYTHONPATH="$PWD" python3 -B \
+PYTHONPATH="$PWD" .venv/bin/python3 -B \
   tests/test_flash_mla_sparse_prefill_fp8_v32_v8.py \
   --heads all --case all
 ```
@@ -111,7 +115,7 @@ PYTHONPATH="$PWD" python3 -B \
 **Planner tests — device=CPU · runner=unittest**
 
 ```bash
-python3 -B -m unittest benchmark.v8.test_prefill_benchmark
+.venv/bin/python3 -B -m unittest benchmark.v8.test_prefill_benchmark
 ```
 
 **More:** [launch audit + Compute Sanitizer](#appendix-d-advanced-validation)
@@ -125,7 +129,7 @@ physical N-GPU mode · omitted = all visible GPUs
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 PYTHONPATH="$PWD" \
-python3 -B benchmark/v8/prefill_benchmark.py \
+.venv/bin/python3 -B benchmark/v8/prefill_benchmark.py \
   --gpus 1 --quick --batch 1 --csv ""
 ```
 
@@ -134,7 +138,7 @@ B=1/2/4/8/16/32 · NCCL workers=0**
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 PYTHONPATH="$PWD" \
-python3 -B benchmark/v8/prefill_benchmark.py \
+.venv/bin/python3 -B benchmark/v8/prefill_benchmark.py \
   --gpus 1 \
   --batch 1 2 4 8 16 32 \
   --new 875 --cached 69125 --topk 2048 \
@@ -149,7 +153,7 @@ python3 -B benchmark/v8/prefill_benchmark.py \
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 PYTHONPATH="$PWD" \
-python3 -B benchmark/v8/prefill_benchmark.py \
+.venv/bin/python3 -B benchmark/v8/prefill_benchmark.py \
   --gpus 2 --tp 2 --cp 1 2 \
   --batch 1 2 4 8 16 32 \
   --new 875 --cached 69125 --topk 2048 \
@@ -160,7 +164,7 @@ python3 -B benchmark/v8/prefill_benchmark.py \
 **Dry run — GPU=2 · TP=2 · CP=1/2 · CUDA allocations=0**
 
 ```bash
-python3 -B benchmark/v8/prefill_benchmark.py \
+.venv/bin/python3 -B benchmark/v8/prefill_benchmark.py \
   --dry-run --gpus 2 --tp 2 --cp 1 2 \
   --batch 1 2 4 8 16 32 --csv ""
 ```
@@ -169,17 +173,17 @@ python3 -B benchmark/v8/prefill_benchmark.py \
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 PYTHONPATH="$PWD" \
-python3 -B benchmark/v8/prefill_benchmark.py \
+.venv/bin/python3 -B benchmark/v8/prefill_benchmark.py \
   --gpus 1 --batch 1 8 \
   --bf16 --fp8-dequant --trtllm --decode-chunked
 ```
 
-**Help:** `python3 -B benchmark/v8/prefill_benchmark.py --help`
+**Help:** `.venv/bin/python3 -B benchmark/v8/prefill_benchmark.py --help`
 
 **Default short form:**
 
 ```bash
-python3 -m benchmark.v8
+.venv/bin/python3 -m benchmark.v8
 ```
 
 **Details:** [tensor contract](#appendix-a-kernel-and-tensor-contract) ·
@@ -389,7 +393,7 @@ watchdog=7,200s · override=`MLA_PREFILL_BENCH_WATCHDOG_SECONDS`
 **CUPTI audit — H=128 · case=edge · launch-only=1**
 
 ```bash
-PYTHONPATH="$PWD" python3 -B \
+PYTHONPATH="$PWD" .venv/bin/python3 -B \
   tests/test_flash_mla_sparse_prefill_fp8_v32_v8.py \
   --heads 128 --case edge --launch-only --audit-launches \
   --trace-json /tmp/v8_h128_launches.json
@@ -403,7 +407,7 @@ combine/copy/memset=0 · `aten::cat`=0
 ```bash
 CUDA_LAUNCH_BLOCKING=1 PYTHONPATH="$PWD" \
 compute-sanitizer --tool memcheck --error-exitcode=1 \
-  python3 -B tests/test_flash_mla_sparse_prefill_fp8_v32_v8.py \
+  .venv/bin/python3 -B tests/test_flash_mla_sparse_prefill_fp8_v32_v8.py \
   --heads 128 --case edge --launch-only
 ```
 
@@ -412,16 +416,16 @@ compute-sanitizer --tool memcheck --error-exitcode=1 \
 **1 GPU — TP/CP shape simulation:**
 
 ```bash
-python3 -B benchmark/v8/prefill_benchmark.py --tp
-python3 -B benchmark/v8/prefill_benchmark.py --cp
-python3 -B benchmark/v8/prefill_benchmark.py --tp --cp
+.venv/bin/python3 -B benchmark/v8/prefill_benchmark.py --tp
+.venv/bin/python3 -B benchmark/v8/prefill_benchmark.py --cp
+.venv/bin/python3 -B benchmark/v8/prefill_benchmark.py --tp --cp
 ```
 
 **Matrix — TP=8 · CP=1/2/4/8 · B=1/8 · new=10,000 · cached=90,000 ·
 top-k=512/1,024/2,048:**
 
 ```bash
-python3 -B benchmark/v8/prefill_benchmark.py \
+.venv/bin/python3 -B benchmark/v8/prefill_benchmark.py \
   --tp 8 --cp 1 2 4 8 \
   --batch 1 8 \
   --new 10000 --cached 90000 \
@@ -431,7 +435,7 @@ python3 -B benchmark/v8/prefill_benchmark.py \
 **All simulated ranks — TP=8 · CP=8 · B=1 · new=875:**
 
 ```bash
-python3 -B benchmark/v8/prefill_benchmark.py \
+.venv/bin/python3 -B benchmark/v8/prefill_benchmark.py \
   --tp 8 --cp 8 --all-ranks --batch 1 --new 875
 ```
 
