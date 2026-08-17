@@ -36,7 +36,7 @@ DeepSeek V3.2 KV-cache format, optimized for NVIDIA B200 and B300 GPUs.
 
 ## Build
 
-On a minimal Debian or Ubuntu installation, install the Python venv and C++
+### 1.1 On a minimal Debian or Ubuntu installation, install the Python venv and C++
 build packages first:
 
 ```bash
@@ -63,9 +63,7 @@ toolkit with:
 apt-get update
 apt-get install -y cuda-toolkit-12-9  # or: cuda-toolkit-13-0
 ```
-
-Otherwise, configure the repository by following NVIDIA's
-[CUDA Installation Guide for Linux](https://docs.nvidia.com/cuda/archive/13.0.0/cuda-installation-guide-linux/index.html).
+### 1.2 Installation 
 
 ```bash
 git clone https://github.com/galbi-joa/flashmla-fp8-prefill-v3.2.git
@@ -73,15 +71,14 @@ cd flashmla-fp8-prefill-v3.2
 bash scripts/build_sm100.sh
 ```
 
-The build runs in a child shell, so a missing dependency reports an error
-without closing the SSH session. To reduce build parallelism, use:
+To reduce build parallelism, use:
 
 ```bash
 NVCC_THREADS=4 MAX_JOBS=4 bash scripts/build_sm100.sh
 ```
 
-The script creates `.venv` inside a child shell and cannot activate it in the
-parent SSH shell. The commands below use `.venv/bin/python3` explicitly. To use
+**The script creates `.venv` inside a child shell and cannot activate it in the
+parent SSH shell.** The commands below use `.venv/bin/python3` explicitly. To use
 the shorter `python3` command instead, run `source .venv/bin/activate` first.
 
 Verify that Python loads the extension from this checkout:
