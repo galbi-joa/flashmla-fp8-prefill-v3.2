@@ -18,7 +18,7 @@ DeepSeek V3.2 KV-cache format, optimized for NVIDIA B200 and B300 GPUs.
 
 - NVIDIA B200 or B300 (`SM100f`)
 - CUDA 12.9 or newer
-- CUDA-enabled PyTorch compatible with the installed CUDA toolkit
+- CUDA-enabled PyTorch built for the installed CUDA toolkit
 - Python 3.10 or newer
 - `setuptools`, `wheel`, and `ninja`
 - `kernelkit` when running the numerical correctness tests
@@ -35,14 +35,36 @@ DeepSeek V3.2 KV-cache format, optimized for NVIDIA B200 and B300 GPUs.
 
 ## Build
 
+On a minimal Debian or Ubuntu installation, install the Python venv and C++
+build packages first:
+
+```bash
+apt-get update
+apt-get install -y python3-venv python3-dev build-essential git
+```
+
+If `python3 -m venv` still reports that `ensurepip` is unavailable, install the
+version-matched package, such as `python3.12-venv` for Python 3.12.
+
 ```bash
 git clone https://github.com/galbi-joa/flashmla-fp8-prefill-v3.2.git
 cd flashmla-fp8-prefill-v3.2
 git submodule update --init --recursive
 
-python -m venv .venv
+python3 -m venv --clear .venv
 source .venv/bin/activate
-python -m pip install --upgrade pip setuptools wheel ninja
+python3 -m pip install --upgrade pip setuptools wheel ninja
+python3 -m pip install torch==2.12.1 \
+  --index-url https://download.pytorch.org/whl/cu130
+
+python3 - <<'PY'
+import torch
+
+print("PyTorch:", torch.__version__)
+print("PyTorch CUDA:", torch.version.cuda)
+assert torch.cuda.is_available(), "PyTorch cannot access a CUDA GPU"
+assert torch.version.cuda and torch.version.cuda.startswith("13.0")
+PY
 
 export CUDA_HOME=/usr/local/cuda-13.0
 export PATH="$CUDA_HOME/bin:$PATH"
@@ -50,13 +72,14 @@ export FLASH_MLA_DISABLE_SM90=1
 export NVCC_THREADS=8
 export MAX_JOBS=8
 
-python setup.py build_ext --inplace -v
+test -x "$CUDA_HOME/bin/nvcc"
+python3 setup.py build_ext --inplace -v
 ```
 
 Verify that Python loads the extension from this checkout:
 
 ```bash
-PYTHONPATH="$PWD" python - <<'PY'
+PYTHONPATH="$PWD" python3 - <<'PY'
 import flash_mla.cuda as cuda
 
 print(cuda.__file__)
@@ -67,7 +90,7 @@ PY
 To install the package instead, keep the same build environment and run:
 
 ```bash
-python -m pip install -v --no-build-isolation .
+python3 -m pip install -v --no-build-isolation .
 ```
 
 ## Validate
@@ -75,7 +98,7 @@ python -m pip install -v --no-build-isolation .
 **Numerical suite — H=64/128 · cases=all**
 
 ```bash
-PYTHONPATH="$PWD" python -B \
+PYTHONPATH="$PWD" python3 -B \
   tests/test_flash_mla_sparse_prefill_fp8_v32_v8.py \
   --heads all --case all
 ```
@@ -83,7 +106,7 @@ PYTHONPATH="$PWD" python -B \
 **Planner tests — device=CPU · runner=unittest**
 
 ```bash
-python -B -m unittest benchmark.v8.test_prefill_benchmark
+python3 -B -m unittest benchmark.v8.test_prefill_benchmark
 ```
 
 **More:** [launch audit + Compute Sanitizer](#appendix-d-advanced-validation)
@@ -97,7 +120,7 @@ physical N-GPU mode · omitted = all visible GPUs
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 PYTHONPATH="$PWD" \
-python -B benchmark/v8/prefill_benchmark.py \
+python3 -B benchmark/v8/prefill_benchmark.py \
   --gpus 1 --quick --batch 1 --csv ""
 ```
 
@@ -106,7 +129,7 @@ B=1/2/4/8/16/32 · NCCL workers=0**
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 PYTHONPATH="$PWD" \
-python -B benchmark/v8/prefill_benchmark.py \
+python3 -B benchmark/v8/prefill_benchmark.py \
   --gpus 1 \
   --batch 1 2 4 8 16 32 \
   --new 875 --cached 69125 --topk 2048 \
@@ -121,7 +144,7 @@ python -B benchmark/v8/prefill_benchmark.py \
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 PYTHONPATH="$PWD" \
-python -B benchmark/v8/prefill_benchmark.py \
+python3 -B benchmark/v8/prefill_benchmark.py \
   --gpus 2 --tp 2 --cp 1 2 \
   --batch 1 2 4 8 16 32 \
   --new 875 --cached 69125 --topk 2048 \
@@ -132,7 +155,7 @@ python -B benchmark/v8/prefill_benchmark.py \
 **Dry run — GPU=2 · TP=2 · CP=1/2 · CUDA allocations=0**
 
 ```bash
-python -B benchmark/v8/prefill_benchmark.py \
+python3 -B benchmark/v8/prefill_benchmark.py \
   --dry-run --gpus 2 --tp 2 --cp 1 2 \
   --batch 1 2 4 8 16 32 --csv ""
 ```
@@ -141,17 +164,17 @@ python -B benchmark/v8/prefill_benchmark.py \
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 PYTHONPATH="$PWD" \
-python -B benchmark/v8/prefill_benchmark.py \
+python3 -B benchmark/v8/prefill_benchmark.py \
   --gpus 1 --batch 1 8 \
   --bf16 --fp8-dequant --trtllm --decode-chunked
 ```
 
-**Help:** `python -B benchmark/v8/prefill_benchmark.py --help`
+**Help:** `python3 -B benchmark/v8/prefill_benchmark.py --help`
 
 **Default short form:**
 
 ```bash
-python -m benchmark.v8
+python3 -m benchmark.v8
 ```
 
 **Details:** [tensor contract](#appendix-a-kernel-and-tensor-contract) ·
@@ -361,7 +384,7 @@ watchdog=7,200s · override=`MLA_PREFILL_BENCH_WATCHDOG_SECONDS`
 **CUPTI audit — H=128 · case=edge · launch-only=1**
 
 ```bash
-PYTHONPATH="$PWD" python -B \
+PYTHONPATH="$PWD" python3 -B \
   tests/test_flash_mla_sparse_prefill_fp8_v32_v8.py \
   --heads 128 --case edge --launch-only --audit-launches \
   --trace-json /tmp/v8_h128_launches.json
@@ -375,7 +398,7 @@ combine/copy/memset=0 · `aten::cat`=0
 ```bash
 CUDA_LAUNCH_BLOCKING=1 PYTHONPATH="$PWD" \
 compute-sanitizer --tool memcheck --error-exitcode=1 \
-  python -B tests/test_flash_mla_sparse_prefill_fp8_v32_v8.py \
+  python3 -B tests/test_flash_mla_sparse_prefill_fp8_v32_v8.py \
   --heads 128 --case edge --launch-only
 ```
 
@@ -384,16 +407,16 @@ compute-sanitizer --tool memcheck --error-exitcode=1 \
 **1 GPU — TP/CP shape simulation:**
 
 ```bash
-python -B benchmark/v8/prefill_benchmark.py --tp
-python -B benchmark/v8/prefill_benchmark.py --cp
-python -B benchmark/v8/prefill_benchmark.py --tp --cp
+python3 -B benchmark/v8/prefill_benchmark.py --tp
+python3 -B benchmark/v8/prefill_benchmark.py --cp
+python3 -B benchmark/v8/prefill_benchmark.py --tp --cp
 ```
 
 **Matrix — TP=8 · CP=1/2/4/8 · B=1/8 · new=10,000 · cached=90,000 ·
 top-k=512/1,024/2,048:**
 
 ```bash
-python -B benchmark/v8/prefill_benchmark.py \
+python3 -B benchmark/v8/prefill_benchmark.py \
   --tp 8 --cp 1 2 4 8 \
   --batch 1 8 \
   --new 10000 --cached 90000 \
@@ -403,7 +426,7 @@ python -B benchmark/v8/prefill_benchmark.py \
 **All simulated ranks — TP=8 · CP=8 · B=1 · new=875:**
 
 ```bash
-python -B benchmark/v8/prefill_benchmark.py \
+python3 -B benchmark/v8/prefill_benchmark.py \
   --tp 8 --cp 8 --all-ranks --batch 1 --new 875
 ```
 
