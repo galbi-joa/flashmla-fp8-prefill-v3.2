@@ -66,7 +66,7 @@ apt-get install -y cuda-toolkit-12-9  # or: cuda-toolkit-13-0
 ### 1.2 Installation 
 
 ```bash
-git clone https://github.com/galbi-joa/flashmla-fp8-prefill-v3.2.git
+git clone https://github.com/tai-core/flashmla-fp8-prefill-v3.2.git
 cd flashmla-fp8-prefill-v3.2
 bash scripts/build_sm100.sh
 ```
