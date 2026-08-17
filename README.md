@@ -33,6 +33,7 @@ DeepSeek V3.2 KV-cache format, optimized for NVIDIA B200 and B300 GPUs.
 | `benchmark/v8/prefill_benchmark.py` | Single- and multi-GPU benchmark runner. |
 | `benchmark/v8/test_prefill_benchmark.py` | CPU-only benchmark-planner tests. |
 | `scripts/detect_cuda_home.py` | Selects a compatible CUDA Toolkit (`nvcc >= 12.9`). |
+| `scripts/build_sm100.sh` | Creates the venv, installs matching PyTorch, and builds the extension. |
 
 ## Build
 
@@ -70,55 +71,14 @@ Otherwise, configure the repository by following NVIDIA's
 ```bash
 git clone https://github.com/galbi-joa/flashmla-fp8-prefill-v3.2.git
 cd flashmla-fp8-prefill-v3.2
-git submodule update --init --recursive
+bash scripts/build_sm100.sh
+```
 
-python3 -m venv --clear .venv
-source .venv/bin/activate
-python3 -m pip install --upgrade pip setuptools wheel ninja numpy
+The build runs in a child shell, so a missing dependency reports an error
+without closing the SSH session. To reduce build parallelism, use:
 
-CUDA_HOME="$(python3 scripts/detect_cuda_home.py)" || exit 1
-export CUDA_HOME
-export PATH="$CUDA_HOME/bin:$PATH"
-
-CUDA_VERSION="$(
-  "$CUDA_HOME/bin/nvcc" --version |
-    sed -n 's/.*release \([0-9]*\.[0-9]*\).*/\1/p'
-)"
-case "$CUDA_VERSION" in
-  12.9) TORCH_CUDA_INDEX=cu129 ;;
-  13.0) TORCH_CUDA_INDEX=cu130 ;;
-  *)
-    echo "No documented PyTorch wheel pairing for CUDA $CUDA_VERSION" >&2
-    exit 1
-    ;;
-esac
-
-python3 -m pip install torch==2.12.1 \
-  --index-url "https://download.pytorch.org/whl/$TORCH_CUDA_INDEX"
-
-python3 - <<'PY'
-import os
-import re
-import subprocess
-import torch
-
-print("PyTorch:", torch.__version__)
-print("PyTorch CUDA:", torch.version.cuda)
-assert torch.cuda.is_available(), "PyTorch cannot access a CUDA GPU"
-nvcc_output = subprocess.check_output(
-    [os.path.join(os.environ["CUDA_HOME"], "bin", "nvcc"), "--version"],
-    text=True,
-)
-toolkit_cuda = re.search(r"release\s+(\d+\.\d+)", nvcc_output).group(1)
-assert torch.version.cuda == toolkit_cuda, (torch.version.cuda, toolkit_cuda)
-PY
-
-export FLASH_MLA_DISABLE_SM90=1
-export NVCC_THREADS=8
-export MAX_JOBS=8
-
-test -x "$CUDA_HOME/bin/nvcc"
-python3 setup.py build_ext --inplace -v
+```bash
+NVCC_THREADS=4 MAX_JOBS=4 bash scripts/build_sm100.sh
 ```
 
 Verify that Python loads the extension from this checkout:
