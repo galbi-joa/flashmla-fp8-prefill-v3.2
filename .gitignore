@@ -2,6 +2,7 @@ build
 *.so
 *.egg-info/
 __pycache__/
+.venv/
 /3.2.pdf
 /DeepSeek_V4.pdf
 /Blackwell SM100 GEMMs.md

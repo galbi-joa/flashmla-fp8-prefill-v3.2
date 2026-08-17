@@ -73,6 +73,7 @@ def select_cuda_home() -> tuple[Path, tuple[int, int]]:
         if (version := nvcc_version(home)) is not None
     ]
     supported = [item for item in discovered if item[1] >= MINIMUM_VERSION]
+    preferred = pytorch_cuda_version()
 
     if not supported:
         if discovered:
@@ -85,12 +86,17 @@ def select_cuda_home() -> tuple[Path, tuple[int, int]]:
             print("No CUDA Toolkit installation containing nvcc was found.", file=sys.stderr)
         print(
             "SM100 builds require nvcc 12.9 or newer. "
-            "Install cuda-toolkit-13-0 for a PyTorch cu130 environment.",
+            "Install cuda-toolkit-12-9 or cuda-toolkit-13-0.",
             file=sys.stderr,
         )
         raise SystemExit(1)
 
-    preferred = pytorch_cuda_version()
+    if preferred is None and (explicit := os.environ.get("CUDA_HOME")):
+        explicit_home = Path(explicit).resolve()
+        for item in supported:
+            if item[0] == explicit_home:
+                return item
+
     if preferred is not None:
         exact = [item for item in supported if item[1] == preferred]
         if exact:

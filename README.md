@@ -12,7 +12,7 @@ DeepSeek V3.2 KV-cache format, optimized for NVIDIA B200 and B300 GPUs.
 - Includes numerical correctness, edge-case, launch-audit, and sanitizer tests.
 - Includes standalone single-GPU and physical multi-GPU TP/CP benchmarks.
 - **For a detailed explanation of the kernel design and execution pipeline, see
-  the [technical report](docs/3.2_sm100_native_prefill_explain.md).** 
+  the [technical report](docs/3.2_sm100_native_prefill_explain.md).**
 
 ## Requirements
 
@@ -48,13 +48,20 @@ If `python3 -m venv` still reports that `ensurepip` is unavailable, install the
 version-matched package, such as `python3.12-venv` for Python 3.12.
 
 The PyTorch CUDA wheel includes the CUDA runtime libraries, but it does not
-include the `nvcc` compiler required to build this extension. Install CUDA
-Toolkit 13.0 separately. If the NVIDIA CUDA APT repository is already
-configured, use:
+include the `nvcc` compiler required to build this extension. Install one of
+the following matched configurations:
+
+| CUDA Toolkit | PyTorch wheel | Validation |
+| --- | --- | --- |
+| 12.9 | `torch==2.12.1` from `cu129` | B300 build, H64/H128 correctness, and smoke benchmark |
+| 13.0 | `torch==2.12.1` from `cu130` | B200/B300 production validation |
+
+If the NVIDIA CUDA APT repository is already configured, install either
+toolkit with:
 
 ```bash
 apt-get update
-apt-get install -y cuda-toolkit-13-0
+apt-get install -y cuda-toolkit-12-9  # or: cuda-toolkit-13-0
 ```
 
 Otherwise, configure the repository by following NVIDIA's
@@ -68,21 +75,44 @@ git submodule update --init --recursive
 python3 -m venv --clear .venv
 source .venv/bin/activate
 python3 -m pip install --upgrade pip setuptools wheel ninja numpy
+
+CUDA_HOME="$(python3 scripts/detect_cuda_home.py)" || exit 1
+export CUDA_HOME
+export PATH="$CUDA_HOME/bin:$PATH"
+
+CUDA_VERSION="$(
+  "$CUDA_HOME/bin/nvcc" --version |
+    sed -n 's/.*release \([0-9]*\.[0-9]*\).*/\1/p'
+)"
+case "$CUDA_VERSION" in
+  12.9) TORCH_CUDA_INDEX=cu129 ;;
+  13.0) TORCH_CUDA_INDEX=cu130 ;;
+  *)
+    echo "No documented PyTorch wheel pairing for CUDA $CUDA_VERSION" >&2
+    exit 1
+    ;;
+esac
+
 python3 -m pip install torch==2.12.1 \
-  --index-url https://download.pytorch.org/whl/cu130
+  --index-url "https://download.pytorch.org/whl/$TORCH_CUDA_INDEX"
 
 python3 - <<'PY'
+import os
+import re
+import subprocess
 import torch
 
 print("PyTorch:", torch.__version__)
 print("PyTorch CUDA:", torch.version.cuda)
 assert torch.cuda.is_available(), "PyTorch cannot access a CUDA GPU"
-assert torch.version.cuda and torch.version.cuda.startswith("13.0")
+nvcc_output = subprocess.check_output(
+    [os.path.join(os.environ["CUDA_HOME"], "bin", "nvcc"), "--version"],
+    text=True,
+)
+toolkit_cuda = re.search(r"release\s+(\d+\.\d+)", nvcc_output).group(1)
+assert torch.version.cuda == toolkit_cuda, (torch.version.cuda, toolkit_cuda)
 PY
 
-CUDA_HOME="$(python3 scripts/detect_cuda_home.py)" || exit 1
-export CUDA_HOME
-export PATH="$CUDA_HOME/bin:$PATH"
 export FLASH_MLA_DISABLE_SM90=1
 export NVCC_THREADS=8
 export MAX_JOBS=8
